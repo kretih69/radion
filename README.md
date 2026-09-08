@@ -35,6 +35,34 @@ npm run dev:web
 
 Vite proxies `/api` to the backend.
 
+## Deploy API to Railway
+
+Config lives in [`railway.toml`](railway.toml) (build/start + `/health`).
+
+1. Create a Railway project and deploy this repo (root directory = monorepo root).
+2. Add a **PostgreSQL** plugin so Railway injects `DATABASE_URL`.
+3. Apply the schema once (Railway query pane, or `railway connect` / `psql "$DATABASE_URL"`):
+
+```bash
+psql "$DATABASE_URL" -f apps/api/sql/schema.sql
+```
+
+4. Set service variables:
+
+| Variable | Notes |
+| --- | --- |
+| `DATABASE_URL` | From Postgres plugin (usually automatic) |
+| `JWT_SECRET` | Strong random secret (do not use the dev default) |
+| `GOOGLE_CLIENT_ID` | Same Web client ID as local Google sign-in |
+| `WEB_ORIGINS` | Comma-separated production frontend origins (optional; `http://localhost:5173` is always allowed) |
+| `PORT` | Set by Railway automatically |
+
+5. Deploy and check `https://<your-api>.up.railway.app/health` → `{ "ok": true, "service": "radion2-api" }`.
+
+6. When you host the web app, add its origin to `WEB_ORIGINS` and to Google Cloud **Authorized JavaScript origins** (the web origin, not the API URL).
+
+Local web can call a Railway API as long as CORS includes localhost (default).
+
 ## Auth & favorites
 
 Login is optional. Browse freely without an account.
@@ -54,10 +82,11 @@ Create an account from the login screen (Register), log in with email/password, 
 GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
 ```
 
-4. Apply the DB migration (once):
+4. Apply the DB migration (once) if your DB was created before Google auth:
 
 ```bash
 psql -d radion2 -f apps/api/sql/migrations/001_google_auth.sql
+psql -d radion2 -f apps/api/sql/migrations/002_user_avatar.sql
 ```
 
 First Google sign-in automatically creates the user. If that email already has a password account, Google is linked to it.
@@ -81,3 +110,4 @@ First Google sign-in automatically creates the user. If that email already has a
 | `GET /api/countries` | Countries with station counts |
 | `GET /api/tags` | Popular tags |
 | `GET /api/languages` | Popular languages |
+| `GET /health` | Liveness (Railway healthcheck) |

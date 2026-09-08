@@ -1,0 +1,13 @@
+# RadiOn2 API — Railway (monorepo root)
+# https://docs.railway.com/guides/config-as-code
+
+[build]
+builder = "NIXPACKS"
+buildCommand = "npm install && npm run build -w @radion2/api"
+
+[deploy]
+startCommand = "npm run start -w @radion2/api"
+healthcheckPath = "/health"
+healthcheckTimeout = 100
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5

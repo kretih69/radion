@@ -16,10 +16,23 @@ import { openUpstreamStream, proxyResponseHeaders } from "./streamProxy.js";
 
 const app = new Hono();
 
+const defaultOrigins = [
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+];
+
+function webOrigins(): string[] {
+  const fromEnv =
+    process.env.WEB_ORIGINS?.split(",")
+      .map((origin) => origin.trim())
+      .filter(Boolean) ?? [];
+  return [...new Set([...defaultOrigins, ...fromEnv])];
+}
+
 app.use(
   "*",
   cors({
-    origin: ["http://localhost:5173", "http://127.0.0.1:5173"],
+    origin: webOrigins(),
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowHeaders: ["Content-Type", "Authorization"],
   }),
