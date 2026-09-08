@@ -1,0 +1,21 @@
+{
+  "name": "radion2",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Radio station browser — monorepo (API + web)",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspaces --if-present",
+    "dev:api": "npm run dev -w @radion2/api",
+    "dev:web": "npm run dev -w @radion2/web",
+    "build": "npm run build -w @radion2/api && npm run build -w @radion2/web",
+    "start": "npm run start -w @radion2/api",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
