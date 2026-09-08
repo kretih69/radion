@@ -125,7 +125,7 @@ export function SideMenu({
 
       <aside className={`sidebar ${open ? "is-open" : ""}`} aria-label="Main menu">
         <div className="sidebar__brand">
-          <span className="sidebar__logo">RadiOn2</span>
+          <span className="sidebar__logo">RadiOn Online</span>
           <span className="sidebar__tag">Station browser</span>
         </div>
 

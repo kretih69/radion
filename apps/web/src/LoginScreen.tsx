@@ -98,7 +98,7 @@ export function LoginScreen({ onSuccess, onClose }: LoginScreenProps) {
           ×
         </button>
 
-        <p className="login-screen__brand">RadiOn2</p>
+        <p className="login-screen__brand">RadiOn Online</p>
         <h1 id="login-title" className="login-screen__title">
           {mode === "login" ? "Welcome back" : "Create account"}
         </h1>
