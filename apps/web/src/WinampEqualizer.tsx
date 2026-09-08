@@ -98,7 +98,7 @@ function EqSlider({
         <span
           className="winamp-eq__thumb"
           aria-hidden
-          style={{ bottom: `calc(${t * 100}% - 0.28rem)` }}
+          style={{ bottom: `calc(${t * 100}% - 0.26rem)` }}
         />
       </div>
       <span className="winamp-eq__label">{label}</span>
@@ -144,13 +144,18 @@ export function WinampEqualizer({
         )}
 
         <div className="winamp-eq__scale" aria-hidden>
-          <span>+12</span>
-          <span className="winamp-eq__scale-mid">
-            <i />
-            0
-            <i />
+          <div className="winamp-eq__scale-rail">
+            <span className="winamp-eq__scale-max">+12</span>
+            <span className="winamp-eq__scale-mid">
+              <i />
+              0
+              <i />
+            </span>
+            <span className="winamp-eq__scale-min">-12</span>
+          </div>
+          <span className="winamp-eq__label winamp-eq__label--spacer">
+            &nbsp;
           </span>
-          <span>-12</span>
         </div>
 
         <div className="winamp-eq__bands">

@@ -1,6 +1,6 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
-const BAR_COUNT = 24;
+const BAR_COUNT = 48;
 const BAR_FALL = 0.28;
 /** Frames to hold a peak at its high before it starts falling. */
 const PEAK_HOLD_FRAMES = 18;
@@ -12,7 +12,44 @@ type SpectrumAnalyzerProps = {
   analyser: AnalyserNode | null;
 };
 
+type FullscreenElement = HTMLElement & {
+  webkitRequestFullscreen?: () => Promise<void> | void;
+};
+
+type FullscreenDocument = Document & {
+  webkitFullscreenElement?: Element | null;
+  webkitExitFullscreen?: () => Promise<void> | void;
+};
+
+function getFullscreenElement(): Element | null {
+  const doc = document as FullscreenDocument;
+  return document.fullscreenElement ?? doc.webkitFullscreenElement ?? null;
+}
+
+async function requestElementFullscreen(el: HTMLElement): Promise<void> {
+  const node = el as FullscreenElement;
+  if (node.requestFullscreen) {
+    await node.requestFullscreen();
+    return;
+  }
+  if (node.webkitRequestFullscreen) {
+    await node.webkitRequestFullscreen();
+  }
+}
+
+async function exitElementFullscreen(): Promise<void> {
+  const doc = document as FullscreenDocument;
+  if (document.fullscreenElement) {
+    await document.exitFullscreen();
+    return;
+  }
+  if (doc.webkitFullscreenElement && doc.webkitExitFullscreen) {
+    await doc.webkitExitFullscreen();
+  }
+}
+
 export function SpectrumAnalyzer({ active, analyser }: SpectrumAnalyzerProps) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const barsRef = useRef(new Float32Array(BAR_COUNT));
   const peaksRef = useRef(new Float32Array(BAR_COUNT));
@@ -20,9 +57,23 @@ export function SpectrumAnalyzer({ active, analyser }: SpectrumAnalyzerProps) {
   const analyserRef = useRef<AnalyserNode | null>(analyser);
   const activeRef = useRef(active);
   const dataRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
+  const [expanded, setExpanded] = useState(false);
 
   analyserRef.current = analyser;
   activeRef.current = active;
+
+  useEffect(() => {
+    function syncFullscreen() {
+      const root = rootRef.current;
+      setExpanded(Boolean(root && getFullscreenElement() === root));
+    }
+    document.addEventListener("fullscreenchange", syncFullscreen);
+    document.addEventListener("webkitfullscreenchange", syncFullscreen);
+    return () => {
+      document.removeEventListener("fullscreenchange", syncFullscreen);
+      document.removeEventListener("webkitfullscreenchange", syncFullscreen);
+    };
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -55,21 +106,43 @@ export function SpectrumAnalyzer({ active, analyser }: SpectrumAnalyzerProps) {
       const data = dataRef.current;
       node.getByteFrequencyData(data);
 
+      // Non-overlapping log bands so neighboring bars don't share the same
+      // coarse low-frequency bins (which made bars 2–6 move identically).
       const binCount = data.length;
+      const nyquist = node.context.sampleRate / 2;
+      const minHz = 40;
+      const maxHz = Math.min(16_000, nyquist * 0.92);
+      const minBin = Math.max(
+        1,
+        Math.round((minHz / nyquist) * binCount),
+      );
+      const maxBin = Math.max(
+        minBin + BAR_COUNT,
+        Math.min(
+          binCount - 1,
+          Math.round((maxHz / nyquist) * binCount),
+        ),
+      );
+      const ratio = maxBin / minBin;
+
       for (let i = 0; i < BAR_COUNT; i += 1) {
-        const start = Math.floor((i / BAR_COUNT) ** 1.55 * binCount);
-        const end = Math.floor(((i + 1) / BAR_COUNT) ** 1.55 * binCount);
+        const start = Math.round(minBin * ratio ** (i / BAR_COUNT));
+        let end = Math.round(minBin * ratio ** ((i + 1) / BAR_COUNT));
+        if (end <= start) end = start + 1;
+        const from = Math.min(start, maxBin);
+        const to = Math.min(Math.max(end, from + 1), maxBin + 1);
+
         let peak = 0;
         let sum = 0;
         let count = 0;
-        for (let j = start; j < Math.max(start + 1, end); j += 1) {
+        for (let j = from; j < to; j += 1) {
           const value = data[j] ?? 0;
           peak = Math.max(peak, value);
           sum += value;
           count += 1;
         }
         const avg = count ? sum / count : 0;
-        out[i] = Math.min(1, (peak * 0.7 + avg * 0.3) / 240);
+        out[i] = Math.min(1, (peak * 0.65 + avg * 0.35) / 240);
       }
     };
 
@@ -102,7 +175,7 @@ export function SpectrumAnalyzer({ active, analyser }: SpectrumAnalyzerProps) {
       const padY = height * 0.08;
       const innerW = width - padX * 2;
       const innerH = height - padY * 2;
-      const gap = innerW * 0.028;
+      const gap = Math.max(1, innerW * 0.008);
       const barW = (innerW - gap * (BAR_COUNT - 1)) / BAR_COUNT;
       const segmentH = Math.max(2, height * 0.035);
       const segmentGap = Math.max(1, segmentH * 0.35);
@@ -140,19 +213,57 @@ export function SpectrumAnalyzer({ active, analyser }: SpectrumAnalyzerProps) {
     return () => cancelAnimationFrame(raf);
   }, []);
 
+  async function toggleFullscreen() {
+    const root = rootRef.current;
+    if (!root) return;
+    try {
+      if (getFullscreenElement() === root) {
+        await exitElementFullscreen();
+      } else {
+        await requestElementFullscreen(root);
+      }
+    } catch (err) {
+      console.warn("Fullscreen unavailable", err);
+    }
+  }
+
   const hasSignal = Boolean(analyser);
 
   return (
-    <div
-      className={`spectrum ${active ? "is-live" : ""}`}
-      aria-hidden={!active}
-      aria-label={active ? "Frequency visualization" : undefined}
-    >
-      <div className="spectrum__label">
-        <span>SPECTRUM</span>
-        <em>{active ? (hasSignal ? "LIVE" : "WAIT") : "IDLE"}</em>
+    <>
+      {expanded && <div className="spectrum spectrum--slot" aria-hidden />}
+      <div
+        ref={rootRef}
+        className={`spectrum ${active ? "is-live" : ""} ${expanded ? "is-expanded" : ""}`}
+        role="button"
+        tabIndex={0}
+        aria-expanded={expanded}
+        aria-label={
+          expanded
+            ? "Spectrum visualization, full screen. Press Escape to exit."
+            : "Spectrum visualization. Activate for full screen."
+        }
+        onClick={() => {
+          void toggleFullscreen();
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            void toggleFullscreen();
+          }
+        }}
+      >
+        <div className="spectrum__label">
+          <span>SPECTRUM</span>
+          <em>{active ? (hasSignal ? "LIVE" : "WAIT") : "IDLE"}</em>
+        </div>
+        <canvas ref={canvasRef} className="spectrum__canvas" />
+        {expanded && (
+          <span className="spectrum__hint" aria-hidden>
+            Click or Esc to exit full screen
+          </span>
+        )}
       </div>
-      <canvas ref={canvasRef} className="spectrum__canvas" />
-    </div>
+    </>
   );
 }

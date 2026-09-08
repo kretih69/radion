@@ -92,7 +92,7 @@ export function useRadioPlayer() {
 
     if (!analyserNodeRef.current) {
       const node = ctx.createAnalyser();
-      node.fftSize = 512;
+      node.fftSize = 2048;
       node.smoothingTimeConstant = 0.5;
       node.minDecibels = -90;
       node.maxDecibels = -20;
