@@ -12,6 +12,7 @@ import type {
   UserPreferences,
 } from "@radion2/shared";
 import { loadToken } from "./auth";
+import { apiUrl } from "./config";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const token = loadToken();
@@ -23,7 +24,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers.set("Authorization", `Bearer ${token}`);
   }
 
-  const response = await fetch(path, { ...init, headers });
+  const response = await fetch(apiUrl(path), { ...init, headers });
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as {
       error?: string;

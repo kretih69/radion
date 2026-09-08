@@ -8,6 +8,7 @@ import {
 import type { Station } from "@radion2/shared";
 import { loadToken } from "./auth";
 import { playStation, saveLastPlayed } from "./api";
+import { apiUrl } from "./config";
 import { dbToGain, EQ_BANDS, EQ_DEFAULT } from "./eqBands";
 
 export type PlayerStatus = "idle" | "loading" | "playing" | "paused" | "error";
@@ -24,7 +25,9 @@ function playbackErrorMessage(_error: unknown): string {
 }
 
 function streamProxyUrl(uuid: string): string {
-  return `/api/stations/${encodeURIComponent(uuid)}/stream?ts=${Date.now()}`;
+  return apiUrl(
+    `/api/stations/${encodeURIComponent(uuid)}/stream?ts=${Date.now()}`,
+  );
 }
 
 async function persistLastPlayed(station: Station): Promise<void> {

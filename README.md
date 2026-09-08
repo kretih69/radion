@@ -63,6 +63,30 @@ psql "$DATABASE_URL" -f apps/api/sql/schema.sql
 
 Local web can call a Railway API as long as CORS includes localhost (default).
 
+## Deploy web to Netlify
+
+Config lives in [`netlify.toml`](netlify.toml) (build from monorepo root → `apps/web/dist`).
+
+1. Create a Netlify site from this GitHub repo.
+2. In **Build settings**, set exactly:
+   - **Base directory:** empty (repo root)
+   - **Build command:** `npm install && npm run build -w @radion2/web`
+   - **Publish directory:** `apps/web/dist` (not `apps/web` — that serves raw Vite source and shows a blank page)
+3. In Netlify **Environment variables**, set:
+
+| Variable | Value |
+| --- | --- |
+| `VITE_API_BASE_URL` | Your Railway API origin, no trailing slash — e.g. `https://radion2api-production.up.railway.app` |
+
+4. Trigger a **Clear cache and deploy site**. After deploy, View page source: you should see `/assets/index-….js`, not `/src/main.tsx`.
+5. On Railway API, set `WEB_ORIGINS` to your Netlify URL(s), e.g. `https://radion2.netlify.app`. Redeploy/restart the API if needed.
+6. In [Google Cloud Console](https://console.cloud.google.com/apis/credentials), add the same Netlify origin under **Authorized JavaScript origins**.
+7. Open the Netlify site and confirm browse + play + Google login work.
+
+Local `npm run dev:web` leaves `VITE_API_BASE_URL` unset and keeps using the Vite `/api` proxy.
+
+**Blank page?** Netlify is publishing `apps/web` (source) instead of `apps/web/dist` (build). Fix publish directory and redeploy.
+
 ## Auth & favorites
 
 Login is optional. Browse freely without an account.

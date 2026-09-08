@@ -1,0 +1,22 @@
+# RadiOn2 web — Netlify
+# Site settings (Site configuration → Build & deploy → Build settings):
+#   Base directory:  (leave EMPTY — repo root)
+#   Build command:   npm install && npm run build -w @radion2/web
+#   Publish directory: apps/web/dist   ← must be dist, not apps/web
+#
+# VITE_* vars are baked in at build time. Keep the Railway API origin here
+# (UI env vars alone are easy to miss without a cache-clear redeploy).
+
+[build]
+  command = "npm install && npm run build -w @radion2/web"
+  publish = "apps/web/dist"
+
+[build.environment]
+  NODE_VERSION = "20"
+  VITE_API_BASE_URL = "https://radion2api-production.up.railway.app"
+
+# SPA fallback (existing files in dist/ still win over this)
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

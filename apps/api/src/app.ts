@@ -21,18 +21,32 @@ const defaultOrigins = [
   "http://127.0.0.1:5173",
 ];
 
-function webOrigins(): string[] {
+function allowedOrigins(): Set<string> {
   const fromEnv =
     process.env.WEB_ORIGINS?.split(",")
       .map((origin) => origin.trim())
       .filter(Boolean) ?? [];
-  return [...new Set([...defaultOrigins, ...fromEnv])];
+  return new Set([...defaultOrigins, ...fromEnv]);
+}
+
+function isAllowedWebOrigin(origin: string): boolean {
+  if (allowedOrigins().has(origin)) return true;
+  try {
+    const host = new URL(origin).hostname;
+    // Netlify production + deploy previews
+    if (host === "radion2.netlify.app" || host.endsWith(".netlify.app")) {
+      return true;
+    }
+  } catch {
+    // ignore invalid Origin
+  }
+  return false;
 }
 
 app.use(
   "*",
   cors({
-    origin: webOrigins(),
+    origin: (origin) => (origin && isAllowedWebOrigin(origin) ? origin : null),
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowHeaders: ["Content-Type", "Authorization"],
   }),
