@@ -79,7 +79,7 @@ export function SpectrumAnalyzer({ active, analyser }: SpectrumAnalyzerProps) {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const ctx = canvas.getContext("2d");
+    const ctx = canvas.getContext("2d", { alpha: true });
     if (!ctx) return;
 
     let raf = 0;
@@ -100,15 +100,22 @@ export function SpectrumAnalyzer({ active, analyser }: SpectrumAnalyzerProps) {
       const node = analyserRef.current;
       if (!activeRef.current || !node) return;
 
-      if (!dataRef.current || dataRef.current.length !== node.frequencyBinCount) {
-        dataRef.current = new Uint8Array(node.frequencyBinCount);
+      // Keep AudioContext running — Safari often suspends it in background tabs.
+      const audioCtx = node.context as AudioContext;
+      if (audioCtx.state === "suspended") {
+        void audioCtx.resume();
+      }
+
+      const binCount = node.frequencyBinCount;
+      if (!dataRef.current || dataRef.current.length !== binCount) {
+        // Explicit ArrayBuffer avoids Safari TypedArray edge cases.
+        dataRef.current = new Uint8Array(new ArrayBuffer(binCount));
       }
       const data = dataRef.current;
       node.getByteFrequencyData(data);
 
       // Non-overlapping log bands so neighboring bars don't share the same
       // coarse low-frequency bins (which made bars 2–6 move identically).
-      const binCount = data.length;
       const nyquist = node.context.sampleRate / 2;
       const minHz = 40;
       const maxHz = Math.min(16_000, nyquist * 0.92);

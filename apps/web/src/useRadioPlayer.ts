@@ -9,7 +9,9 @@ import type { Station } from "@radion2/shared";
 import { loadToken } from "./auth";
 import { playStation, saveLastPlayed } from "./api";
 import { apiUrl } from "./config";
+import { DecodedAudioStream } from "./decodedAudioStream";
 import { dbToGain, EQ_BANDS, EQ_DEFAULT } from "./eqBands";
+import { isWebKit } from "./isWebKit";
 
 export type PlayerStatus = "idle" | "loading" | "playing" | "paused" | "error";
 
@@ -30,6 +32,23 @@ function streamProxyUrl(uuid: string): string {
   );
 }
 
+/**
+ * Safari: `crossOrigin="anonymous"` forces a CORS check even for same-origin
+ * Vite-proxied `/api/...` streams. Only enable CORS mode for real cross-origin APIs.
+ */
+function applyStreamCorsMode(audio: HTMLAudioElement, streamUrl: string): void {
+  try {
+    const absolute = new URL(streamUrl, window.location.href);
+    if (absolute.origin !== window.location.origin) {
+      audio.crossOrigin = "anonymous";
+    } else {
+      audio.removeAttribute("crossorigin");
+    }
+  } catch {
+    audio.crossOrigin = "anonymous";
+  }
+}
+
 async function persistLastPlayed(station: Station): Promise<void> {
   if (!loadToken()) return;
   try {
@@ -45,9 +64,13 @@ export function useRadioPlayer() {
   const sourceRef = useRef<MediaElementAudioSourceNode | null>(null);
   const analyserNodeRef = useRef<AnalyserNode | null>(null);
   const preampRef = useRef<GainNode | null>(null);
+  const masterGainRef = useRef<GainNode | null>(null);
   const filtersRef = useRef<BiquadFilterNode[]>([]);
+  const decodedStreamRef = useRef<DecodedAudioStream | null>(null);
+  const usingDecodedRef = useRef(false);
   const eqValuesRef = useRef<number[]>([...EQ_DEFAULT]);
   const eqEnabledRef = useRef(true);
+  const volumeRef = useRef(0.85);
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
   const [eqValues, setEqValues] = useState<number[]>([...EQ_DEFAULT]);
   const [eqEnabled, setEqEnabledState] = useState(true);
@@ -67,6 +90,19 @@ export function useRadioPlayer() {
     });
   }, []);
 
+  const applyMasterVolume = useCallback((value: number) => {
+    volumeRef.current = value;
+    if (masterGainRef.current) {
+      masterGainRef.current.gain.value = value;
+    }
+    // Media-element path still uses element volume when MES is inactive.
+    if (audioRef.current && !usingDecodedRef.current && !sourceRef.current) {
+      audioRef.current.volume = value;
+    } else if (audioRef.current && sourceRef.current) {
+      audioRef.current.volume = 1;
+    }
+  }, []);
+
   const setupAudioGraph = useCallback(async () => {
     const audio = audioRef.current;
     if (!audio) return null;
@@ -82,7 +118,9 @@ export function useRadioPlayer() {
       sourceRef.current = null;
       analyserNodeRef.current = null;
       preampRef.current = null;
+      masterGainRef.current = null;
       filtersRef.current = [];
+      decodedStreamRef.current = null;
     }
 
     const ctx = audioContextRef.current;
@@ -93,10 +131,18 @@ export function useRadioPlayer() {
     if (!analyserNodeRef.current) {
       const node = ctx.createAnalyser();
       node.fftSize = 2048;
-      node.smoothingTimeConstant = 0.5;
+      node.smoothingTimeConstant = 0.55;
       node.minDecibels = -90;
-      node.maxDecibels = -20;
+      node.maxDecibels = -25;
       analyserNodeRef.current = node;
+    }
+
+    if (!masterGainRef.current) {
+      const master = ctx.createGain();
+      master.gain.value = volumeRef.current;
+      masterGainRef.current = master;
+      analyserNodeRef.current.connect(master);
+      master.connect(ctx.destination);
     }
 
     if (!preampRef.current) {
@@ -113,26 +159,42 @@ export function useRadioPlayer() {
       });
       filtersRef.current = filters;
 
-      // source → preamp → filters… → analyser → destination
+      // preamp → filters… → analyser → master → destination
       let node: AudioNode = preamp;
       for (const filter of filters) {
         node.connect(filter);
         node = filter;
       }
       node.connect(analyserNodeRef.current);
-      analyserNodeRef.current.connect(ctx.destination);
-    }
-
-    if (!sourceRef.current) {
-      const source = ctx.createMediaElementSource(audio);
-      source.connect(preampRef.current);
-      sourceRef.current = source;
     }
 
     applyEqToGraph(eqValuesRef.current, eqEnabledRef.current);
     setAnalyser(analyserNodeRef.current);
     return analyserNodeRef.current;
   }, [applyEqToGraph]);
+
+  const connectMediaElementSource = useCallback(() => {
+    const audio = audioRef.current;
+    const ctx = audioContextRef.current;
+    const preamp = preampRef.current;
+    if (!audio || !ctx || !preamp || sourceRef.current) return;
+
+    try {
+      const source = ctx.createMediaElementSource(audio);
+      source.connect(preamp);
+      sourceRef.current = source;
+      audio.volume = 1;
+    } catch (err) {
+      console.warn("MediaElementSource setup", err);
+    }
+  }, []);
+
+  const stopDecodedStream = useCallback(async () => {
+    usingDecodedRef.current = false;
+    const decoded = decodedStreamRef.current;
+    decodedStreamRef.current = null;
+    if (decoded) await decoded.stop();
+  }, []);
 
   const setEqBand = useCallback(
     (index: number, value: number) => {
@@ -166,17 +228,29 @@ export function useRadioPlayer() {
   useEffect(() => {
     const audio = new Audio();
     audio.preload = "none";
-    audio.crossOrigin = "anonymous";
-    audio.volume = volume;
+    audio.volume = volumeRef.current;
+    // Safari: keep the element in the document for more reliable media behavior.
+    audio.setAttribute("playsinline", "true");
+    audio.style.display = "none";
+    document.body.appendChild(audio);
     audioRef.current = audio;
 
-    const onPlaying = () => setStatus("playing");
+    const onPlaying = () => {
+      if (usingDecodedRef.current) return;
+      setStatus("playing");
+      void audioContextRef.current?.resume();
+    };
     const onPause = () => {
+      if (usingDecodedRef.current) return;
       if (!audio.src) return;
       setStatus("paused");
     };
-    const onWaiting = () => setStatus("loading");
+    const onWaiting = () => {
+      if (usingDecodedRef.current) return;
+      setStatus("loading");
+    };
     const onError = () => {
+      if (usingDecodedRef.current) return;
       setStatus("error");
       setError("Stream failed to load. Try another station.");
     };
@@ -193,32 +267,75 @@ export function useRadioPlayer() {
       audio.removeEventListener("pause", onPause);
       audio.removeEventListener("waiting", onWaiting);
       audio.removeEventListener("error", onError);
+      audio.remove();
+      void decodedStreamRef.current?.stop();
+      decodedStreamRef.current = null;
       void audioContextRef.current?.close();
       audioContextRef.current = null;
       sourceRef.current = null;
       analyserNodeRef.current = null;
       preampRef.current = null;
+      masterGainRef.current = null;
       filtersRef.current = [];
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    if (audioRef.current) {
-      audioRef.current.volume = volume;
-    }
-  }, [volume]);
+    applyMasterVolume(volume);
+  }, [applyMasterVolume, volume]);
+
+  const playViaMediaElement = useCallback(
+    async (url: string) => {
+      const audio = audioRef.current;
+      if (!audio) return;
+
+      await stopDecodedStream();
+      applyStreamCorsMode(audio, url);
+      connectMediaElementSource();
+      audio.src = url;
+      audio.load();
+      await audioContextRef.current?.resume();
+      await audio.play();
+      await audioContextRef.current?.resume();
+    },
+    [connectMediaElementSource, stopDecodedStream],
+  );
+
+  const playViaDecodedStream = useCallback(
+    async (url: string) => {
+      const audio = audioRef.current;
+      const ctx = audioContextRef.current;
+      const preamp = preampRef.current;
+      if (!audio || !ctx || !preamp) {
+        throw new Error("Audio graph not ready");
+      }
+
+      // Stop element playback — decoded path owns audio output.
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+
+      usingDecodedRef.current = true;
+      if (!decodedStreamRef.current) {
+        decodedStreamRef.current = new DecodedAudioStream(ctx);
+      }
+      await ctx.resume();
+      try {
+        await decodedStreamRef.current.start(url, preamp);
+      } catch (err) {
+        usingDecodedRef.current = false;
+        await decodedStreamRef.current.stop();
+        throw err;
+      }
+      await ctx.resume();
+    },
+    [],
+  );
 
   const play = useCallback(
     async (next: Station) => {
       const audio = audioRef.current;
       if (!audio) return;
-
-      try {
-        await setupAudioGraph();
-      } catch (err) {
-        console.warn("Audio analyser setup failed", err);
-      }
 
       setStation(next);
       setStatus("loading");
@@ -228,11 +345,30 @@ export function useRadioPlayer() {
         void playStation(next.stationuuid);
         void persistLastPlayed(next);
 
-        audio.crossOrigin = "anonymous";
-        audio.src = streamProxyUrl(next.stationuuid);
-
+        const url = streamProxyUrl(next.stationuuid);
+        await setupAudioGraph();
         await audioContextRef.current?.resume();
-        await audio.play();
+
+        if (isWebKit()) {
+          try {
+            await playViaDecodedStream(url);
+          } catch (decodedError) {
+            if (
+              decodedError instanceof DOMException &&
+              decodedError.name === "AbortError"
+            ) {
+              return;
+            }
+            console.warn(
+              "WebKit decoded stream failed, falling back to media element",
+              decodedError,
+            );
+            await playViaMediaElement(url);
+          }
+        } else {
+          await playViaMediaElement(url);
+        }
+
         setStatus("playing");
       } catch (playError) {
         if (isAutoplayBlocked(playError)) {
@@ -245,49 +381,84 @@ export function useRadioPlayer() {
         setError(playbackErrorMessage(playError));
       }
     },
-    [setupAudioGraph],
+    [playViaDecodedStream, playViaMediaElement, setupAudioGraph],
   );
 
   const toggle = useCallback(async () => {
     const audio = audioRef.current;
     if (!audio || !station) return;
 
-    if (audio.paused) {
-      try {
-        await setupAudioGraph();
-        setStatus("loading");
-        setError(null);
-
-        if (!audio.getAttribute("src")) {
-          audio.crossOrigin = "anonymous";
-          audio.src = streamProxyUrl(station.stationuuid);
-        }
-
-        void playStation(station.stationuuid);
-        void persistLastPlayed(station);
-        await audioContextRef.current?.resume();
-        await audio.play();
-        setStatus("playing");
-      } catch (playError) {
-        setStatus("error");
-        setError(playbackErrorMessage(playError));
+    if (status === "playing" || (!audio.paused && !usingDecodedRef.current)) {
+      if (usingDecodedRef.current) {
+        await stopDecodedStream();
+        setStatus("paused");
+        return;
       }
-    } else {
       audio.pause();
       setStatus("paused");
+      return;
     }
-  }, [setupAudioGraph, station]);
 
-  const stop = useCallback(() => {
+    try {
+      setStatus("loading");
+      setError(null);
+
+      const url = streamProxyUrl(station.stationuuid);
+      await setupAudioGraph();
+      void playStation(station.stationuuid);
+      void persistLastPlayed(station);
+
+      if (isWebKit()) {
+        try {
+          await playViaDecodedStream(url);
+        } catch (decodedError) {
+          console.warn(
+            "WebKit decoded stream failed, falling back to media element",
+            decodedError,
+          );
+          await playViaMediaElement(url);
+        }
+      } else {
+        if (!audio.getAttribute("src")) {
+          applyStreamCorsMode(audio, url);
+          connectMediaElementSource();
+          audio.src = url;
+          audio.load();
+        } else {
+          connectMediaElementSource();
+        }
+        await audioContextRef.current?.resume();
+        await audio.play();
+        await audioContextRef.current?.resume();
+      }
+
+      setStatus("playing");
+    } catch (playError) {
+      setStatus("error");
+      setError(playbackErrorMessage(playError));
+    }
+  }, [
+    connectMediaElementSource,
+    playViaDecodedStream,
+    playViaMediaElement,
+    setupAudioGraph,
+    station,
+    status,
+    stopDecodedStream,
+  ]);
+
+  const stop = useCallback(async () => {
     const audio = audioRef.current;
-    if (!audio) return;
-    audio.pause();
-    audio.removeAttribute("src");
-    audio.load();
+    await stopDecodedStream();
+    if (audio) {
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+    }
     setStation(null);
     setStatus("idle");
     setError(null);
-  }, []);
+  }, [stopDecodedStream]);
 
   const onVolumeInput = useCallback((event: SyntheticEvent<HTMLInputElement>) => {
     setVolume(Number(event.currentTarget.value));

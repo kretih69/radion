@@ -37,6 +37,12 @@ function isAllowedWebOrigin(origin: string): boolean {
     if (host === "radion2.netlify.app" || host.endsWith(".netlify.app")) {
       return true;
     }
+    if (
+      host === "radion-online.com" ||
+      host === "www.radion-online.com"
+    ) {
+      return true;
+    }
   } catch {
     // ignore invalid Origin
   }
@@ -294,9 +300,12 @@ app.get("/api/stations/:uuid/stream", async (c) => {
 
   try {
     const upstream = await openUpstreamStream(click.url);
+    const requestOrigin = c.req.header("Origin");
+    const corsOrigin =
+      requestOrigin && isAllowedWebOrigin(requestOrigin) ? requestOrigin : null;
     return new Response(upstream.body, {
       status: 200,
-      headers: proxyResponseHeaders(upstream),
+      headers: proxyResponseHeaders(upstream, corsOrigin),
     });
   } catch (error) {
     const message =

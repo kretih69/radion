@@ -56,7 +56,10 @@ export async function openUpstreamStream(url: string): Promise<Response> {
   return upstream;
 }
 
-export function proxyResponseHeaders(upstream: Response): Headers {
+export function proxyResponseHeaders(
+  upstream: Response,
+  origin?: string | null,
+): Headers {
   const headers = new Headers();
   const type = upstream.headers.get("content-type") || "audio/mpeg";
   headers.set("Content-Type", type);
@@ -65,6 +68,16 @@ export function proxyResponseHeaders(upstream: Response): Headers {
 
   const length = upstream.headers.get("content-length");
   if (length) headers.set("Content-Length", length);
+
+  // Safari requires CORS on the media response for MediaElementSource /
+  // AnalyserNode to receive real samples (otherwise spectrum stays flat).
+  headers.set("Access-Control-Allow-Origin", origin?.trim() || "*");
+  headers.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+  headers.set(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Range, Icy-MetaData, Authorization",
+  );
+  headers.set("Vary", "Origin");
 
   return headers;
 }
