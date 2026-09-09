@@ -65,9 +65,10 @@ export function proxyResponseHeaders(
   headers.set("Content-Type", type);
   headers.set("Cache-Control", "no-store, no-cache");
   headers.set("Accept-Ranges", "none");
-
-  const length = upstream.headers.get("content-length");
-  if (length) headers.set("Content-Length", length);
+  // Never forward Content-Length — live mounts are endless; a finite length
+  // makes browsers stop the media element after N bytes.
+  headers.set("Connection", "keep-alive");
+  headers.set("X-Accel-Buffering", "no");
 
   // Safari requires CORS on the media response for MediaElementSource /
   // AnalyserNode to receive real samples (otherwise spectrum stays flat).

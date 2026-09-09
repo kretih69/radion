@@ -9,18 +9,34 @@ type PcmDecoder = {
   free(): void;
 };
 
+type UrlSource = string | (() => string);
+
+/** Keep roughly this much audio scheduled ahead of the playhead. */
+const MAX_AHEAD_SEC = 1.75;
+/** Reconnect if no decode progress for this long while supposed to be live. */
+const STALL_RECONNECT_MS = 4_000;
+const MAX_RECONNECT_DELAY_MS = 8_000;
+
 /**
  * Safari/WebKit: MediaElementSource + live Icecast/radio streams feed the
  * AnalyserNode with silence (WebKit bug). Decode MP3/AAC via WASM and play
  * through Web Audio so EQ + spectrum both work.
+ *
+ * Auto-reconnects when the HTTP body ends or stalls (proxy/upstream timeouts).
  */
 export class DecodedAudioStream {
   private abort: AbortController | null = null;
   private decoder: PcmDecoder | null = null;
   private nextStart = 0;
   private activeSources = new Set<AudioBufferSourceNode>();
-  private pump: Promise<void> | null = null;
   private entry: AudioNode | null = null;
+  private urlSource: UrlSource | null = null;
+  private codec: StreamCodec | null = null;
+  private lastProgressAt = 0;
+  private reconnectAttempt = 0;
+  private watchdogTimer: number | null = null;
+  private reconnectTimer: number | null = null;
+  private pumpGeneration = 0;
 
   constructor(private readonly ctx: AudioContext) {}
 
@@ -28,11 +44,31 @@ export class DecodedAudioStream {
     return Boolean(this.abort && !this.abort.signal.aborted);
   }
 
-  async start(url: string, entry: AudioNode): Promise<void> {
+  async start(urlSource: UrlSource, entry: AudioNode): Promise<void> {
     await this.stop();
     this.entry = entry;
+    this.urlSource = urlSource;
     this.abort = new AbortController();
-    const { signal } = this.abort;
+    this.reconnectAttempt = 0;
+    this.lastProgressAt = performance.now();
+    this.startWatchdog();
+
+    await this.connectAndPump(true);
+  }
+
+  private resolveUrl(): string {
+    const source = this.urlSource;
+    if (!source) throw new Error("No stream URL");
+    return typeof source === "function" ? source() : source;
+  }
+
+  private async connectAndPump(waitForAudio: boolean): Promise<void> {
+    const signal = this.abort?.signal;
+    const entry = this.entry;
+    if (!signal || !entry || signal.aborted) return;
+
+    const generation = ++this.pumpGeneration;
+    const url = this.resolveUrl();
 
     const response = await fetch(url, {
       signal,
@@ -50,30 +86,57 @@ export class DecodedAudioStream {
       throw new Error(`Unsupported stream type for decoded pipeline: ${type}`);
     }
 
-    // Peek the first chunk so we can sniff ADTS vs MP3 when Content-Type is vague.
     const reader = response.body.getReader();
     const first = await reader.read();
     if (first.done || !first.value?.byteLength) {
       throw new Error("Empty stream");
     }
 
-    const codec = detectCodec(type, first.value);
-    const decoder = await createDecoder(codec);
-    this.decoder = decoder;
-    if (signal.aborted) {
-      decoder.free();
+    if (!this.codec) {
+      this.codec = detectCodec(type, first.value);
+    }
+
+    if (!this.decoder) {
+      this.decoder = await createDecoder(this.codec);
+    } else {
+      // Fresh HTTP body — reset decoder state for a clean bitstream.
+      this.decoder.free();
+      this.decoder = await createDecoder(this.codec);
+    }
+
+    if (signal.aborted || generation !== this.pumpGeneration) {
+      this.decoder.free();
+      this.decoder = null;
       return;
     }
 
-    this.nextStart = this.ctx.currentTime + 0.2;
-    this.pump = this.readBody(reader, decoder, signal, first.value);
-    await Promise.race([
-      this.waitForFirstAudio(signal),
-      this.pump.catch((err) => {
-        if (signal.aborted) return;
-        throw err;
-      }),
-    ]);
+    this.clearScheduledSources();
+    this.nextStart = this.ctx.currentTime + 0.25;
+    this.lastProgressAt = performance.now();
+    this.reconnectAttempt = 0;
+
+    const pump = this.readBody(
+      reader,
+      this.decoder,
+      signal,
+      first.value,
+      generation,
+    );
+
+    if (waitForAudio) {
+      await Promise.race([
+        this.waitForFirstAudio(signal),
+        pump.catch((err) => {
+          if (signal.aborted) return;
+          throw err;
+        }),
+      ]);
+    }
+
+    void pump.then(() => {
+      if (signal.aborted || generation !== this.pumpGeneration) return;
+      this.scheduleReconnect("stream ended");
+    });
   }
 
   private waitForFirstAudio(signal: AbortSignal): Promise<void> {
@@ -103,14 +166,21 @@ export class DecodedAudioStream {
     decoder: PcmDecoder,
     signal: AbortSignal,
     firstChunk: Uint8Array,
+    generation: number,
   ): Promise<void> {
     try {
       this.feed(decoder, firstChunk);
-      while (!signal.aborted) {
+      while (!signal.aborted && generation === this.pumpGeneration) {
         const { done, value } = await reader.read();
         if (done) break;
         if (!value?.byteLength) continue;
         this.feed(decoder, value);
+      }
+    } catch (err) {
+      if (!signal.aborted && generation === this.pumpGeneration) {
+        this.scheduleReconnect(
+          err instanceof Error ? err.message : "stream read failed",
+        );
       }
     } finally {
       try {
@@ -126,6 +196,7 @@ export class DecodedAudioStream {
     const frames = decoded.channelData?.[0]?.length ?? 0;
     const samples = decoded.samplesDecoded ?? frames;
     if (samples > 0 && decoded.channelData?.length && decoded.sampleRate) {
+      this.lastProgressAt = performance.now();
       this.schedule(decoded.channelData, decoded.sampleRate);
     }
   }
@@ -134,6 +205,12 @@ export class DecodedAudioStream {
     const entry = this.entry;
     if (!entry || signalAborted(this.abort)) return;
 
+    // Avoid building minutes of backlog after a stall/catch-up burst.
+    const now = this.ctx.currentTime;
+    if (this.nextStart - now > MAX_AHEAD_SEC) {
+      return;
+    }
+
     const frames = channelData[0]?.length ?? 0;
     if (!frames) return;
 
@@ -141,7 +218,6 @@ export class DecodedAudioStream {
     for (let c = 0; c < channelData.length; c += 1) {
       const src = channelData[c];
       if (!src) continue;
-      // Copy — decoder may reuse backing buffers on the next decode().
       buffer.copyToChannel(src.slice(), c);
     }
 
@@ -149,7 +225,6 @@ export class DecodedAudioStream {
     source.buffer = buffer;
     source.connect(entry);
 
-    const now = this.ctx.currentTime;
     if (this.nextStart < now + 0.05) {
       this.nextStart = now + 0.05;
     }
@@ -168,10 +243,44 @@ export class DecodedAudioStream {
     source.start(startAt);
   }
 
-  async stop(): Promise<void> {
-    this.abort?.abort();
-    this.abort = null;
+  private startWatchdog(): void {
+    this.clearWatchdog();
+    this.watchdogTimer = window.setInterval(() => {
+      if (!this.running || !this.entry) return;
+      if (this.ctx.state === "suspended") {
+        void this.ctx.resume();
+        return;
+      }
+      const silent =
+        this.activeSources.size === 0 &&
+        performance.now() - this.lastProgressAt > STALL_RECONNECT_MS;
+      const stalledFeed =
+        performance.now() - this.lastProgressAt > STALL_RECONNECT_MS * 1.5;
+      if (silent || stalledFeed) {
+        this.scheduleReconnect("stall watchdog");
+      }
+    }, 1_000);
+  }
 
+  private scheduleReconnect(_reason: string): void {
+    if (!this.running || this.reconnectTimer != null) return;
+
+    const attempt = this.reconnectAttempt;
+    this.reconnectAttempt += 1;
+    const delay = Math.min(
+      MAX_RECONNECT_DELAY_MS,
+      400 * 2 ** Math.min(attempt, 4),
+    );
+
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.connectAndPump(false).catch(() => {
+        this.scheduleReconnect("reconnect failed");
+      });
+    }, delay);
+  }
+
+  private clearScheduledSources(): void {
     for (const source of this.activeSources) {
       try {
         source.stop();
@@ -185,9 +294,30 @@ export class DecodedAudioStream {
       }
     }
     this.activeSources.clear();
+  }
+
+  private clearWatchdog(): void {
+    if (this.watchdogTimer != null) {
+      window.clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
+  }
+
+  async stop(): Promise<void> {
+    this.pumpGeneration += 1;
+    this.abort?.abort();
+    this.abort = null;
+
+    if (this.reconnectTimer != null) {
+      window.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.clearWatchdog();
+    this.clearScheduledSources();
 
     const decoder = this.decoder;
     this.decoder = null;
+    this.codec = null;
     if (decoder) {
       try {
         decoder.free();
@@ -197,8 +327,9 @@ export class DecodedAudioStream {
     }
 
     this.entry = null;
-    this.pump = null;
+    this.urlSource = null;
     this.nextStart = 0;
+    this.reconnectAttempt = 0;
   }
 }
 
@@ -222,12 +353,9 @@ function sniffCodec(head: Uint8Array): StreamCodec {
     const b0 = head[i] ?? 0;
     const b1 = head[i + 1] ?? 0;
     if (b0 !== 0xff) continue;
-    // ADTS: 12-bit sync 0xFFF, layer bits = 00
     if ((b1 & 0xf6) === 0xf0) return "aac";
-    // MPEG Layer I/II/III: 11-bit sync, layer != 00
     if ((b1 & 0xe0) === 0xe0 && (b1 & 0x06) !== 0x00) return "mp3";
   }
-  // Default to MP3 — most Icecast mounts; AAC path retries via media element on failure.
   return "mp3";
 }
 

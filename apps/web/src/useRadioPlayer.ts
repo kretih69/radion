@@ -68,6 +68,11 @@ export function useRadioPlayer() {
   const filtersRef = useRef<BiquadFilterNode[]>([]);
   const decodedStreamRef = useRef<DecodedAudioStream | null>(null);
   const usingDecodedRef = useRef(false);
+  const stationRef = useRef<Station | null>(null);
+  const wantPlayingRef = useRef(false);
+  const mediaReconnectTimerRef = useRef<number | null>(null);
+  const mediaReconnectAttemptRef = useRef(0);
+  const waitingWatchdogRef = useRef<number | null>(null);
   const eqValuesRef = useRef<number[]>([...EQ_DEFAULT]);
   const eqEnabledRef = useRef(true);
   const volumeRef = useRef(0.85);
@@ -196,6 +201,99 @@ export function useRadioPlayer() {
     if (decoded) await decoded.stop();
   }, []);
 
+  const clearMediaReconnect = useCallback(() => {
+    if (mediaReconnectTimerRef.current != null) {
+      window.clearTimeout(mediaReconnectTimerRef.current);
+      mediaReconnectTimerRef.current = null;
+    }
+    if (waitingWatchdogRef.current != null) {
+      window.clearTimeout(waitingWatchdogRef.current);
+      waitingWatchdogRef.current = null;
+    }
+  }, []);
+
+  const playViaMediaElement = useCallback(
+    async (url: string) => {
+      const audio = audioRef.current;
+      if (!audio) return;
+
+      await stopDecodedStream();
+      applyStreamCorsMode(audio, url);
+      connectMediaElementSource();
+      audio.src = url;
+      audio.load();
+      await audioContextRef.current?.resume();
+      await audio.play();
+      await audioContextRef.current?.resume();
+    },
+    [connectMediaElementSource, stopDecodedStream],
+  );
+
+  const scheduleMediaReconnect = useCallback(() => {
+    if (!wantPlayingRef.current || usingDecodedRef.current) return;
+    const current = stationRef.current;
+    if (!current) return;
+    if (mediaReconnectTimerRef.current != null) return;
+
+    const attempt = mediaReconnectAttemptRef.current;
+    mediaReconnectAttemptRef.current += 1;
+    const delay = Math.min(8_000, 500 * 2 ** Math.min(attempt, 4));
+
+    setStatus("loading");
+    mediaReconnectTimerRef.current = window.setTimeout(() => {
+      mediaReconnectTimerRef.current = null;
+      if (!wantPlayingRef.current || usingDecodedRef.current) return;
+      const station = stationRef.current;
+      if (!station) return;
+      void playViaMediaElement(streamProxyUrl(station.stationuuid))
+        .then(() => {
+          mediaReconnectAttemptRef.current = 0;
+          setStatus("playing");
+          setError(null);
+        })
+        .catch(() => {
+          scheduleMediaReconnectRef.current();
+        });
+    }, delay);
+  }, [playViaMediaElement]);
+
+  const scheduleMediaReconnectRef = useRef(scheduleMediaReconnect);
+  scheduleMediaReconnectRef.current = scheduleMediaReconnect;
+
+  const playViaDecodedStream = useCallback(
+    async (stationUuid: string) => {
+      const audio = audioRef.current;
+      const ctx = audioContextRef.current;
+      const preamp = preampRef.current;
+      if (!audio || !ctx || !preamp) {
+        throw new Error("Audio graph not ready");
+      }
+
+      // Stop element playback — decoded path owns audio output.
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+
+      usingDecodedRef.current = true;
+      if (!decodedStreamRef.current) {
+        decodedStreamRef.current = new DecodedAudioStream(ctx);
+      }
+      await ctx.resume();
+      try {
+        await decodedStreamRef.current.start(
+          () => streamProxyUrl(stationUuid),
+          preamp,
+        );
+      } catch (err) {
+        usingDecodedRef.current = false;
+        await decodedStreamRef.current.stop();
+        throw err;
+      }
+      await ctx.resume();
+    },
+    [],
+  );
+
   const setEqBand = useCallback(
     (index: number, value: number) => {
       setEqValues((current) => {
@@ -235,37 +333,73 @@ export function useRadioPlayer() {
     document.body.appendChild(audio);
     audioRef.current = audio;
 
+    const clearWaitingWatchdog = () => {
+      if (waitingWatchdogRef.current != null) {
+        window.clearTimeout(waitingWatchdogRef.current);
+        waitingWatchdogRef.current = null;
+      }
+    };
+
     const onPlaying = () => {
       if (usingDecodedRef.current) return;
+      clearWaitingWatchdog();
+      mediaReconnectAttemptRef.current = 0;
       setStatus("playing");
+      setError(null);
       void audioContextRef.current?.resume();
     };
     const onPause = () => {
       if (usingDecodedRef.current) return;
       if (!audio.src) return;
-      setStatus("paused");
+      if (!wantPlayingRef.current) {
+        setStatus("paused");
+      }
     };
     const onWaiting = () => {
-      if (usingDecodedRef.current) return;
+      if (usingDecodedRef.current || !wantPlayingRef.current) return;
       setStatus("loading");
+      clearWaitingWatchdog();
+      // If we sit in "waiting" too long, force a fresh stream connection.
+      waitingWatchdogRef.current = window.setTimeout(() => {
+        waitingWatchdogRef.current = null;
+        if (!wantPlayingRef.current || usingDecodedRef.current) return;
+        scheduleMediaReconnectRef.current();
+      }, 6_000);
+    };
+    const onStalled = () => {
+      if (usingDecodedRef.current || !wantPlayingRef.current) return;
+      scheduleMediaReconnectRef.current();
+    };
+    const onEnded = () => {
+      if (usingDecodedRef.current || !wantPlayingRef.current) return;
+      scheduleMediaReconnectRef.current();
     };
     const onError = () => {
-      if (usingDecodedRef.current) return;
-      setStatus("error");
-      setError("Stream failed to load. Try another station.");
+      if (usingDecodedRef.current || !wantPlayingRef.current) return;
+      scheduleMediaReconnectRef.current();
     };
 
     audio.addEventListener("playing", onPlaying);
     audio.addEventListener("pause", onPause);
     audio.addEventListener("waiting", onWaiting);
+    audio.addEventListener("stalled", onStalled);
+    audio.addEventListener("ended", onEnded);
     audio.addEventListener("error", onError);
 
     return () => {
+      wantPlayingRef.current = false;
+      clearWaitingWatchdog();
+      if (mediaReconnectTimerRef.current != null) {
+        window.clearTimeout(mediaReconnectTimerRef.current);
+        mediaReconnectTimerRef.current = null;
+      }
       audio.pause();
       audio.removeAttribute("src");
       audio.removeEventListener("playing", onPlaying);
       audio.removeEventListener("pause", onPause);
       audio.removeEventListener("waiting", onWaiting);
+      audio.removeEventListener("stalled", onStalled);
+      audio.removeEventListener("ended", onEnded);
       audio.removeEventListener("error", onError);
       audio.remove();
       void decodedStreamRef.current?.stop();
@@ -284,59 +418,14 @@ export function useRadioPlayer() {
     applyMasterVolume(volume);
   }, [applyMasterVolume, volume]);
 
-  const playViaMediaElement = useCallback(
-    async (url: string) => {
-      const audio = audioRef.current;
-      if (!audio) return;
-
-      await stopDecodedStream();
-      applyStreamCorsMode(audio, url);
-      connectMediaElementSource();
-      audio.src = url;
-      audio.load();
-      await audioContextRef.current?.resume();
-      await audio.play();
-      await audioContextRef.current?.resume();
-    },
-    [connectMediaElementSource, stopDecodedStream],
-  );
-
-  const playViaDecodedStream = useCallback(
-    async (url: string) => {
-      const audio = audioRef.current;
-      const ctx = audioContextRef.current;
-      const preamp = preampRef.current;
-      if (!audio || !ctx || !preamp) {
-        throw new Error("Audio graph not ready");
-      }
-
-      // Stop element playback — decoded path owns audio output.
-      audio.pause();
-      audio.removeAttribute("src");
-      audio.load();
-
-      usingDecodedRef.current = true;
-      if (!decodedStreamRef.current) {
-        decodedStreamRef.current = new DecodedAudioStream(ctx);
-      }
-      await ctx.resume();
-      try {
-        await decodedStreamRef.current.start(url, preamp);
-      } catch (err) {
-        usingDecodedRef.current = false;
-        await decodedStreamRef.current.stop();
-        throw err;
-      }
-      await ctx.resume();
-    },
-    [],
-  );
-
   const play = useCallback(
     async (next: Station) => {
       const audio = audioRef.current;
       if (!audio) return;
 
+      clearMediaReconnect();
+      stationRef.current = next;
+      wantPlayingRef.current = true;
       setStation(next);
       setStatus("loading");
       setError(null);
@@ -345,13 +434,12 @@ export function useRadioPlayer() {
         void playStation(next.stationuuid);
         void persistLastPlayed(next);
 
-        const url = streamProxyUrl(next.stationuuid);
         await setupAudioGraph();
         await audioContextRef.current?.resume();
 
         if (isWebKit()) {
           try {
-            await playViaDecodedStream(url);
+            await playViaDecodedStream(next.stationuuid);
           } catch (decodedError) {
             if (
               decodedError instanceof DOMException &&
@@ -363,25 +451,32 @@ export function useRadioPlayer() {
               "WebKit decoded stream failed, falling back to media element",
               decodedError,
             );
-            await playViaMediaElement(url);
+            await playViaMediaElement(streamProxyUrl(next.stationuuid));
           }
         } else {
-          await playViaMediaElement(url);
+          await playViaMediaElement(streamProxyUrl(next.stationuuid));
         }
 
         setStatus("playing");
       } catch (playError) {
         if (isAutoplayBlocked(playError)) {
+          wantPlayingRef.current = false;
           setStatus("paused");
           setError(null);
           return;
         }
 
+        wantPlayingRef.current = false;
         setStatus("error");
         setError(playbackErrorMessage(playError));
       }
     },
-    [playViaDecodedStream, playViaMediaElement, setupAudioGraph],
+    [
+      clearMediaReconnect,
+      playViaDecodedStream,
+      playViaMediaElement,
+      setupAudioGraph,
+    ],
   );
 
   const toggle = useCallback(async () => {
@@ -389,6 +484,8 @@ export function useRadioPlayer() {
     if (!audio || !station) return;
 
     if (status === "playing" || (!audio.paused && !usingDecodedRef.current)) {
+      wantPlayingRef.current = false;
+      clearMediaReconnect();
       if (usingDecodedRef.current) {
         await stopDecodedStream();
         setStatus("paused");
@@ -400,45 +497,38 @@ export function useRadioPlayer() {
     }
 
     try {
+      clearMediaReconnect();
+      wantPlayingRef.current = true;
+      stationRef.current = station;
       setStatus("loading");
       setError(null);
 
-      const url = streamProxyUrl(station.stationuuid);
       await setupAudioGraph();
       void playStation(station.stationuuid);
       void persistLastPlayed(station);
 
       if (isWebKit()) {
         try {
-          await playViaDecodedStream(url);
+          await playViaDecodedStream(station.stationuuid);
         } catch (decodedError) {
           console.warn(
             "WebKit decoded stream failed, falling back to media element",
             decodedError,
           );
-          await playViaMediaElement(url);
+          await playViaMediaElement(streamProxyUrl(station.stationuuid));
         }
       } else {
-        if (!audio.getAttribute("src")) {
-          applyStreamCorsMode(audio, url);
-          connectMediaElementSource();
-          audio.src = url;
-          audio.load();
-        } else {
-          connectMediaElementSource();
-        }
-        await audioContextRef.current?.resume();
-        await audio.play();
-        await audioContextRef.current?.resume();
+        await playViaMediaElement(streamProxyUrl(station.stationuuid));
       }
 
       setStatus("playing");
     } catch (playError) {
+      wantPlayingRef.current = false;
       setStatus("error");
       setError(playbackErrorMessage(playError));
     }
   }, [
-    connectMediaElementSource,
+    clearMediaReconnect,
     playViaDecodedStream,
     playViaMediaElement,
     setupAudioGraph,
@@ -449,6 +539,9 @@ export function useRadioPlayer() {
 
   const stop = useCallback(async () => {
     const audio = audioRef.current;
+    wantPlayingRef.current = false;
+    stationRef.current = null;
+    clearMediaReconnect();
     await stopDecodedStream();
     if (audio) {
       audio.pause();
@@ -458,7 +551,7 @@ export function useRadioPlayer() {
     setStation(null);
     setStatus("idle");
     setError(null);
-  }, [stopDecodedStream]);
+  }, [clearMediaReconnect, stopDecodedStream]);
 
   const onVolumeInput = useCallback((event: SyntheticEvent<HTMLInputElement>) => {
     setVolume(Number(event.currentTarget.value));
