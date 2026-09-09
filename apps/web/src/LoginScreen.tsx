@@ -11,11 +11,12 @@ import type { AuthUser } from "@radion2/shared";
 type LoginScreenProps = {
   onSuccess: (user: AuthUser, token: string) => void;
   onClose: () => void;
+  onOpenPrivacy?: () => void;
 };
 
 type Mode = "login" | "register";
 
-export function LoginScreen({ onSuccess, onClose }: LoginScreenProps) {
+export function LoginScreen({ onSuccess, onClose, onOpenPrivacy }: LoginScreenProps) {
   const [mode, setMode] = useState<Mode>("login");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -178,6 +179,14 @@ export function LoginScreen({ onSuccess, onClose }: LoginScreenProps) {
             </>
           )}
         </p>
+
+        {onOpenPrivacy && (
+          <p className="login-screen__privacy">
+            <button type="button" onClick={onOpenPrivacy}>
+              Privacy policy
+            </button>
+          </p>
+        )}
       </div>
     </div>
   );

@@ -870,13 +870,43 @@ button {
   border: 0;
   border-radius: 0.5rem;
   background: transparent;
-  color: var(--danger);
+  color: var(--text);
   text-align: left;
   padding: 0.7rem 0.8rem;
   font-weight: 600;
 }
 
 .sidebar__logout:hover {
+  background: rgba(232, 162, 58, 0.1);
+}
+
+.sidebar__menu-item {
+  width: 100%;
+  border: 0;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: var(--paper);
+  text-align: left;
+  padding: 0.7rem 0.8rem;
+  font-weight: 600;
+}
+
+.sidebar__menu-item:hover {
+  background: rgba(232, 162, 58, 0.1);
+}
+
+.sidebar__delete-account {
+  width: 100%;
+  border: 0;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: var(--danger);
+  text-align: left;
+  padding: 0.7rem 0.8rem;
+  font-weight: 600;
+}
+
+.sidebar__delete-account:hover {
   background: rgba(255, 123, 114, 0.12);
 }
 
@@ -1231,6 +1261,135 @@ button {
   padding: 0;
 }
 
+.login-screen__privacy {
+  margin: 0.85rem 0 0;
+  text-align: center;
+}
+
+.login-screen__privacy button {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+  padding: 0;
+}
+
+.login-screen__privacy button:hover {
+  color: var(--paper);
+}
+
+.legal-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+}
+
+.legal-screen__backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.legal-screen__panel {
+  position: relative;
+  z-index: 1;
+  width: min(42rem, 100%);
+  max-height: min(88vh, 52rem);
+  overflow: auto;
+  border: 1px solid rgba(232, 162, 58, 0.28);
+  border-radius: 1rem;
+  background: rgba(14, 18, 22, 0.98);
+  padding: 1.35rem 1.4rem 1.6rem;
+  box-shadow: 0 22px 50px rgba(0, 0, 0, 0.5);
+  animation: rise 0.2s ease-out both;
+}
+
+.legal-screen__close {
+  position: absolute;
+  top: 0.7rem;
+  right: 0.75rem;
+  width: 2rem;
+  height: 2rem;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 1.45rem;
+  line-height: 1;
+}
+
+.legal-screen__close:hover {
+  color: var(--paper);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.legal-screen__brand {
+  margin: 0 0 0.35rem;
+  font-family: Fraunces, Georgia, serif;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--amber);
+}
+
+.legal-screen__title {
+  margin: 0;
+  font-family: Fraunces, Georgia, serif;
+  font-size: clamp(1.55rem, 3vw, 1.9rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.legal-screen__meta {
+  margin: 0.45rem 0 1.1rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.legal-screen__body {
+  color: var(--paper);
+  font-size: 0.95rem;
+  line-height: 1.55;
+}
+
+.legal-screen__body h2 {
+  margin: 1.35rem 0 0.45rem;
+  font-family: Fraunces, Georgia, serif;
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+.legal-screen__body h3 {
+  margin: 0.95rem 0 0.35rem;
+  font-size: 0.98rem;
+  font-weight: 650;
+  color: rgba(244, 247, 251, 0.92);
+}
+
+.legal-screen__body p {
+  margin: 0 0 0.7rem;
+}
+
+.legal-screen__body ul {
+  margin: 0 0 0.85rem;
+  padding-left: 1.15rem;
+}
+
+.legal-screen__body li {
+  margin: 0.25rem 0;
+}
+
+.legal-screen__body a {
+  color: var(--amber);
+  text-underline-offset: 0.15em;
+}
+
 .toast-backdrop {
   position: fixed;
   inset: 0;
@@ -1288,6 +1447,78 @@ button {
   color: #1a1206;
   font-weight: 700;
   padding: 0.55rem 1rem;
+}
+
+.toast--danger {
+  border-color: rgba(255, 123, 114, 0.45);
+}
+
+.toast__danger {
+  border: 0;
+  border-radius: 0.5rem;
+  background: linear-gradient(180deg, #ff8f86, #e2554b);
+  color: #1a0a08;
+  font-weight: 700;
+  padding: 0.55rem 1rem;
+}
+
+.toast__danger:hover {
+  filter: brightness(1.05);
+}
+
+.notice-toast {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  z-index: 85;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  width: min(22rem, calc(100% - 2rem));
+  border: 1px solid rgba(255, 123, 114, 0.4);
+  border-radius: 0.75rem;
+  background: rgba(22, 14, 14, 0.96);
+  padding: 0.85rem 0.9rem;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.4);
+  animation: notice-in 0.22s ease-out both;
+}
+
+.notice-toast p {
+  margin: 0;
+  flex: 1;
+  font-size: 0.92rem;
+  line-height: 1.4;
+  color: #ffd2cd;
+  font-weight: 550;
+}
+
+.notice-toast__close {
+  flex-shrink: 0;
+  width: 1.6rem;
+  height: 1.6rem;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: rgba(255, 210, 205, 0.75);
+  font-size: 1.25rem;
+  line-height: 1;
+  padding: 0;
+}
+
+.notice-toast__close:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+@keyframes notice-in {
+  from {
+    opacity: 0;
+    transform: translateY(-0.45rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .atmosphere {
@@ -1885,8 +2116,7 @@ button {
   animation-delay: 1s;
 }
 
-.player__detail,
-.player__error {
+.player__detail {
   margin: 0;
   font-size: 0.8rem;
   color: var(--fog);
@@ -1906,10 +2136,6 @@ button {
   padding: 0.1rem 0.45rem;
   border-radius: 999px;
   white-space: nowrap;
-}
-
-.player__error {
-  color: var(--danger);
 }
 
 .player__controls {

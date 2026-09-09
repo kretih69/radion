@@ -3,6 +3,7 @@ import { pool, type DbFavorite, type DbLastPlayed } from "./db.js";
 import {
   createToken,
   createUser,
+  deleteUserById,
   findUserByEmail,
   findUserById,
   requireAuth,
@@ -126,6 +127,15 @@ authRoutes.get("/me", requireAuth(), async (c) => {
     return c.json({ error: "User not found" }, 401);
   }
   return c.json({ user: toPublicUser(row) });
+});
+
+authRoutes.delete("/me", requireAuth(), async (c) => {
+  const session = c.get("user");
+  const deleted = await deleteUserById(session.id);
+  if (!deleted) {
+    return c.json({ error: "User not found" }, 404);
+  }
+  return c.json({ ok: true });
 });
 
 export const favoriteRoutes = new Hono<{ Variables: AuthVariables }>();

@@ -164,6 +164,11 @@ export async function upsertGoogleUser(input: {
   return toPublicUser(created.rows[0]);
 }
 
+export async function deleteUserById(id: string): Promise<boolean> {
+  const result = await pool.query(`DELETE FROM users WHERE id = $1`, [id]);
+  return (result.rowCount ?? 0) > 0;
+}
+
 export function requireAuth() {
   return createMiddleware<{ Variables: AuthVariables }>(async (c, next) => {
     const header = c.req.header("authorization");

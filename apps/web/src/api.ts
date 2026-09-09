@@ -141,6 +141,10 @@ export function getMe(): Promise<{ user: AuthUser }> {
   return request("/api/auth/me");
 }
 
+export function deleteAccount(): Promise<{ ok: boolean }> {
+  return request("/api/auth/me", { method: "DELETE" });
+}
+
 export function getFavorites(): Promise<FavoriteStation[]> {
   return request("/api/favorites");
 }

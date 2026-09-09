@@ -28,6 +28,8 @@ type SideMenuProps = {
   onNavigate: (mode: NavId) => void;
   onClose: () => void;
   onLogout: () => void;
+  onPrivacyPolicy: () => void;
+  onDeleteAccount: () => void;
   onLogin: () => void;
   onPlay: (station: Station) => void;
   onPlayRandom: () => void;
@@ -69,6 +71,8 @@ export function SideMenu({
   onNavigate,
   onClose,
   onLogout,
+  onPrivacyPolicy,
+  onDeleteAccount,
   onLogin,
   onPlay,
   onPlayRandom,
@@ -226,6 +230,30 @@ export function SideMenu({
                       }}
                     >
                       Log out
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="sidebar__menu-item"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        onPrivacyPolicy();
+                        onClose();
+                      }}
+                    >
+                      Privacy policy
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="sidebar__delete-account"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        onDeleteAccount();
+                        onClose();
+                      }}
+                    >
+                      Delete account
                     </button>
                   </div>
                 )}

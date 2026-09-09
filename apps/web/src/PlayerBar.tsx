@@ -11,7 +11,6 @@ import type { PlayerStatus } from "./useRadioPlayer";
 type PlayerBarProps = {
   station: Station | null;
   status: PlayerStatus;
-  error: string | null;
   volume: number;
   isFavorite: boolean;
   onToggle: () => void;
@@ -77,7 +76,6 @@ function MarqueeTitle({ text }: { text: string }) {
 export function PlayerBar({
   station,
   status,
-  error,
   volume,
   isFavorite,
   onToggle,
@@ -124,7 +122,6 @@ export function PlayerBar({
             ))}
           </div>
         )}
-        {error && <p className="player__error">{error}</p>}
       </div>
       <div className="player__controls">
         <button

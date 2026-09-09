@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react
 import type { AuthUser, Country, Language, Station, Tag } from "@radion2/shared";
 import {
   addFavorite,
+  deleteAccount,
   getCountries,
   getFavorites,
   getGeoCountry,
@@ -23,8 +24,10 @@ import {
   saveSession,
 } from "./auth";
 import { LoginScreen } from "./LoginScreen";
+import { NoticeToast } from "./NoticeToast";
 import { PlayerBar } from "./PlayerBar";
 import { PreferencesPanel } from "./PreferencesPanel";
+import { PrivacyPolicy } from "./PrivacyPolicy";
 import { DiscoverFilters } from "./DiscoverFilters";
 import { SideMenu, type NavId } from "./SideMenu";
 import { StationCard } from "./StationCard";
@@ -158,6 +161,7 @@ type DialogState = {
   message: string;
   confirmLabel?: string;
   cancelLabel?: string;
+  danger?: boolean;
   onConfirm?: () => void;
 };
 
@@ -167,6 +171,7 @@ export default function App() {
   const [mode, setMode] = useState<NavId>("discover");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showLogin, setShowLogin] = useState(false);
+  const [showPrivacy, setShowPrivacy] = useState(false);
   const [dialog, setDialog] = useState<DialogState | null>(null);
   const [playRandomLoading, setPlayRandomLoading] = useState(false);
   const [user, setUser] = useState<AuthUser | null>(() => loadAuthUser());
@@ -579,6 +584,39 @@ export default function App() {
     if (mode === "favorites" || mode === "preferences") setMode("discover");
   }
 
+  function handleDeleteAccount() {
+    setDialog({
+      message:
+        "Delete your account? This permanently removes your profile, favorites, preferences, and listening history. This cannot be undone.",
+      cancelLabel: "Cancel",
+      confirmLabel: "Continue",
+      danger: true,
+      onConfirm: () => {
+        setDialog({
+          message:
+            "Are you absolutely sure? All of your data will be deleted forever.",
+          cancelLabel: "Keep account",
+          confirmLabel: "Delete my account",
+          danger: true,
+          onConfirm: () => {
+            void (async () => {
+              try {
+                await deleteAccount();
+                handleLogout();
+              } catch (error) {
+                const message =
+                  error instanceof Error
+                    ? error.message
+                    : "Could not delete account";
+                setDialog({ message });
+              }
+            })();
+          },
+        });
+      },
+    });
+  }
+
   function handleLoginSuccess(nextUser: AuthUser, token: string) {
     saveSession(nextUser, token);
     setUser(nextUser);
@@ -612,6 +650,8 @@ export default function App() {
         onNavigate={setMode}
         onClose={() => setSidebarOpen(false)}
         onLogout={handleLogout}
+        onPrivacyPolicy={() => setShowPrivacy(true)}
+        onDeleteAccount={handleDeleteAccount}
         onLogin={() => setShowLogin(true)}
         onPlay={player.play}
         onPlayRandom={() => void playRandomStation()}
@@ -753,7 +793,6 @@ export default function App() {
           <PlayerBar
             station={player.station}
             status={player.status}
-            error={player.error}
             volume={player.volume}
             isFavorite={
               player.station
@@ -770,11 +809,23 @@ export default function App() {
         </div>
       </div>
 
+      {player.error && (
+        <NoticeToast message={player.error} onDismiss={player.clearError} />
+      )}
+
       {showLogin && (
         <LoginScreen
           onSuccess={handleLoginSuccess}
           onClose={() => setShowLogin(false)}
+          onOpenPrivacy={() => {
+            setShowLogin(false);
+            setShowPrivacy(true);
+          }}
         />
+      )}
+
+      {showPrivacy && (
+        <PrivacyPolicy onClose={() => setShowPrivacy(false)} />
       )}
 
       {dialog && (
@@ -789,6 +840,7 @@ export default function App() {
             message={dialog.message}
             confirmLabel={dialog.confirmLabel}
             cancelLabel={dialog.cancelLabel}
+            danger={dialog.danger}
             onConfirm={() => {
               const action = dialog.onConfirm;
               setDialog(null);

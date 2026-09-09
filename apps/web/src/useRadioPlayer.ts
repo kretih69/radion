@@ -464,6 +464,10 @@ export function useRadioPlayer() {
     setVolume(Number(event.currentTarget.value));
   }, []);
 
+  const clearError = useCallback(() => {
+    setError(null);
+  }, []);
+
   return {
     station,
     status,
@@ -479,5 +483,6 @@ export function useRadioPlayer() {
     toggle,
     stop,
     setVolume: onVolumeInput,
+    clearError,
   };
 }
