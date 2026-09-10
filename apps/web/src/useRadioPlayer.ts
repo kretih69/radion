@@ -40,6 +40,28 @@ function directStreamUrl(station: Station): string | null {
   return url || null;
 }
 
+/** HTTPS pages cannot load plain HTTP media (mixed content). */
+function isMixedContentBlocked(streamUrl: string): boolean {
+  if (typeof window === "undefined") return false;
+  if (window.location.protocol !== "https:") return false;
+  try {
+    return new URL(streamUrl, window.location.href).protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+function canAttemptDirectPlay(
+  station: Station,
+  blockedIds: Set<string>,
+): string | null {
+  if (blockedIds.has(station.stationuuid)) return null;
+  const url = directStreamUrl(station);
+  if (!url) return null;
+  if (isMixedContentBlocked(url)) return null;
+  return url;
+}
+
 /**
  * Safari: `crossOrigin="anonymous"` forces a CORS check even for same-origin
  * Vite-proxied `/api/...` streams. Only enable CORS mode for real cross-origin APIs.
@@ -91,6 +113,8 @@ export function useRadioPlayer() {
   const wantPlayingRef = useRef(false);
   const pathRef = useRef<PlaybackPath>("enhanced");
   const switchingPathRef = useRef(false);
+  /** Stations that cannot play via direct URL (mixed content or failed attempt). */
+  const directBlockedRef = useRef<Set<string>>(new Set());
   const mediaReconnectTimerRef = useRef<number | null>(null);
   const mediaReconnectAttemptRef = useRef(0);
   const waitingWatchdogRef = useRef<number | null>(null);
@@ -342,9 +366,9 @@ export function useRadioPlayer() {
   const playDirect = useCallback(
     async (next: Station) => {
       const direct = directAudioRef.current;
-      const url = directStreamUrl(next);
+      const url = canAttemptDirectPlay(next, directBlockedRef.current);
       if (!direct || !url) {
-        // No direct URL — keep enhanced path.
+        // HTTP-on-HTTPS, missing URL, or previously failed — stay on proxy.
         await playEnhanced(next);
         return;
       }
@@ -355,14 +379,23 @@ export function useRadioPlayer() {
       direct.volume = volumeRef.current;
       direct.src = url;
       direct.load();
-      await direct.play();
+      try {
+        await direct.play();
+      } catch {
+        directBlockedRef.current.add(next.stationuuid);
+        stopDirectAudio();
+        await playEnhanced(next);
+      }
     },
-    [playEnhanced, stopProxyAudio],
+    [playEnhanced, stopDirectAudio, stopProxyAudio],
   );
 
   const playForVisibility = useCallback(
     async (next: Station) => {
-      if (document.hidden) {
+      const canDirect =
+        document.hidden &&
+        Boolean(canAttemptDirectPlay(next, directBlockedRef.current));
+      if (canDirect) {
         await playDirect(next);
       } else {
         await playEnhanced(next);
@@ -375,7 +408,6 @@ export function useRadioPlayer() {
     if (!wantPlayingRef.current) return;
     if (pathRef.current !== "enhanced") return;
     if (usingDecodedRef.current) return;
-    if (document.hidden) return;
     const current = stationRef.current;
     if (!current) return;
     if (mediaReconnectTimerRef.current != null) return;
@@ -388,7 +420,6 @@ export function useRadioPlayer() {
     mediaReconnectTimerRef.current = window.setTimeout(() => {
       mediaReconnectTimerRef.current = null;
       if (!wantPlayingRef.current || pathRef.current !== "enhanced") return;
-      if (document.hidden) return;
       const station = stationRef.current;
       if (!station) return;
       void playViaMediaElement(streamProxyUrl(station.stationuuid))
@@ -412,27 +443,25 @@ export function useRadioPlayer() {
     if (!current) return;
     if (mediaReconnectTimerRef.current != null) return;
 
-    const attempt = mediaReconnectAttemptRef.current;
-    mediaReconnectAttemptRef.current += 1;
-    const delay = Math.min(8_000, 500 * 2 ** Math.min(attempt, 4));
-
+    // One failed direct stream → prefer proxy for this station for the session.
+    directBlockedRef.current.add(current.stationuuid);
     setStatus("loading");
     mediaReconnectTimerRef.current = window.setTimeout(() => {
       mediaReconnectTimerRef.current = null;
-      if (!wantPlayingRef.current || pathRef.current !== "direct") return;
+      if (!wantPlayingRef.current) return;
       const station = stationRef.current;
       if (!station) return;
-      void playDirect(station)
+      void playEnhanced(station)
         .then(() => {
           mediaReconnectAttemptRef.current = 0;
           setStatus("playing");
           setError(null);
         })
         .catch(() => {
-          scheduleDirectReconnectRef.current();
+          scheduleMediaReconnectRef.current();
         });
-    }, delay);
-  }, [playDirect]);
+    }, 400);
+  }, [playEnhanced]);
 
   const scheduleDirectReconnectRef = useRef(scheduleDirectReconnect);
   scheduleDirectReconnectRef.current = scheduleDirectReconnect;
@@ -441,7 +470,10 @@ export function useRadioPlayer() {
     if (!wantPlayingRef.current || !stationRef.current) return;
     if (switchingPathRef.current) return;
 
-    const wantDirect = document.hidden;
+    const station = stationRef.current;
+    const wantDirect =
+      document.hidden &&
+      Boolean(canAttemptDirectPlay(station, directBlockedRef.current));
     const nextPath: PlaybackPath = wantDirect ? "direct" : "enhanced";
     if (pathRef.current === nextPath) return;
 
@@ -449,22 +481,25 @@ export function useRadioPlayer() {
     clearMediaReconnect();
     setStatus("loading");
     try {
-      await playForVisibility(stationRef.current);
+      if (wantDirect) {
+        await playDirect(station);
+      } else {
+        await playEnhanced(station);
+      }
       setStatus("playing");
       setError(null);
     } catch (err) {
       if (isAutoplayBlocked(err)) {
-        // Background resume can be blocked; keep trying enhanced on focus.
         if (!document.hidden) {
           setStatus("paused");
           wantPlayingRef.current = false;
         }
         return;
       }
-      // If direct fails (bad station URL), fall back to enhanced even in background.
       if (wantDirect) {
+        directBlockedRef.current.add(station.stationuuid);
         try {
-          await playEnhanced(stationRef.current);
+          await playEnhanced(station);
           setStatus("playing");
           setError(null);
           return;
@@ -477,7 +512,7 @@ export function useRadioPlayer() {
     } finally {
       switchingPathRef.current = false;
     }
-  }, [clearMediaReconnect, playEnhanced, playForVisibility]);
+  }, [clearMediaReconnect, playDirect, playEnhanced]);
 
   const syncPathToVisibilityRef = useRef(syncPathToVisibility);
   syncPathToVisibilityRef.current = syncPathToVisibility;
