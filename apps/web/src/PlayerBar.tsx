@@ -13,6 +13,7 @@ type PlayerBarProps = {
   status: PlayerStatus;
   volume: number;
   isFavorite: boolean;
+  nowPlaying?: string | null;
   onToggle: () => void;
   onStop: () => void;
   onVolume: (event: SyntheticEvent<HTMLInputElement>) => void;
@@ -78,6 +79,7 @@ export function PlayerBar({
   status,
   volume,
   isFavorite,
+  nowPlaying = null,
   onToggle,
   onStop,
   onVolume,
@@ -110,6 +112,12 @@ export function PlayerBar({
       <div className="player__info">
         <p className="player__status">{label}</p>
         <MarqueeTitle text={station.name} />
+        {nowPlaying && (
+          <p className="player__now" title={nowPlaying}>
+            <span>Playing now</span>
+            <strong>{nowPlaying}</strong>
+          </p>
+        )}
         <p className="player__detail">
           {[station.country, station.language, station.codec]
             .filter(Boolean)

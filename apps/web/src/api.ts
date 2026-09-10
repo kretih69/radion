@@ -90,6 +90,12 @@ export function playStation(uuid: string): Promise<ClickResult> {
   return request(`/api/stations/${encodeURIComponent(uuid)}/play`);
 }
 
+export function getNowPlaying(
+  uuid: string,
+): Promise<{ stationuuid: string; title: string | null; source: string | null }> {
+  return request(`/api/stations/${encodeURIComponent(uuid)}/now-playing`);
+}
+
 export function getCountries(): Promise<Country[]> {
   return request("/api/countries");
 }

@@ -2122,6 +2122,34 @@ button {
   color: var(--fog);
 }
 
+.player__now {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 0.55rem;
+  margin: 0.15rem 0 0;
+  min-width: 0;
+}
+
+.player__now span {
+  flex-shrink: 0;
+  font-size: 0.68rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--amber);
+}
+
+.player__now strong {
+  min-width: 0;
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: #e8eef5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .player__tags {
   display: flex;
   flex-wrap: wrap;

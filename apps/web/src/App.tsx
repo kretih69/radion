@@ -32,6 +32,7 @@ import { DiscoverFilters } from "./DiscoverFilters";
 import { SideMenu, type NavId } from "./SideMenu";
 import { StationCard } from "./StationCard";
 import { Toast } from "./Toast";
+import { useNowPlaying } from "./useNowPlaying";
 import { useRadioPlayer } from "./useRadioPlayer";
 
 type Filters = {
@@ -168,6 +169,10 @@ type DialogState = {
 export default function App() {
   const player = useRadioPlayer();
   const { play } = player;
+  const nowPlaying = useNowPlaying(
+    player.station?.stationuuid,
+    player.status,
+  );
   const [mode, setMode] = useState<NavId>("discover");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showLogin, setShowLogin] = useState(false);
@@ -794,6 +799,7 @@ export default function App() {
             station={player.station}
             status={player.status}
             volume={player.volume}
+            nowPlaying={nowPlaying}
             isFavorite={
               player.station
                 ? favoriteIds.includes(player.station.stationuuid)

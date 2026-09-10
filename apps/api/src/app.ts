@@ -12,7 +12,7 @@ import { verifyToken } from "./auth.js";
 import { pool } from "./db.js";
 import { authRoutes, favoriteRoutes, lastPlayedRoutes, preferenceRoutes } from "./routesAuth.js";
 import { getCachedTags } from "./tagsCache.js";
-import { openUpstreamStream, proxyResponseHeaders } from "./streamProxy.js";
+import { openUpstreamStream, proxyResponseHeaders, fetchNowPlaying } from "./streamProxy.js";
 
 const app = new Hono();
 
@@ -311,6 +311,31 @@ app.get("/api/stations/:uuid/stream", async (c) => {
     const message =
       error instanceof Error ? error.message : "Stream proxy failed";
     return c.json({ error: message }, 502);
+  }
+});
+
+app.get("/api/stations/:uuid/now-playing", async (c) => {
+  const uuid = c.req.param("uuid");
+  // Use byuuid (not /json/url) so polling does not inflate click stats.
+  const response = await radioFetch(
+    `/json/stations/byuuid/${encodeURIComponent(uuid)}`,
+  );
+  const stations = (await response.json()) as Station[];
+  const station = stations[0];
+  const streamUrl = station?.url_resolved || station?.url;
+  if (!streamUrl) {
+    return c.json({ title: null, source: null, stationuuid: uuid });
+  }
+
+  try {
+    const info = await fetchNowPlaying(streamUrl);
+    return c.json({
+      stationuuid: uuid,
+      title: info.title,
+      source: info.source,
+    });
+  } catch {
+    return c.json({ stationuuid: uuid, title: null, source: null });
   }
 });
 
