@@ -15,6 +15,9 @@ import { isWebKit } from "./isWebKit";
 
 export type PlayerStatus = "idle" | "loading" | "playing" | "paused" | "error";
 
+/** Enhanced = proxy + Web Audio (spectrum/EQ). Direct = station URL, no Railway audio. */
+type PlaybackPath = "enhanced" | "direct";
+
 function isAutoplayBlocked(error: unknown): boolean {
   return (
     error instanceof DOMException &&
@@ -30,6 +33,11 @@ function streamProxyUrl(uuid: string): string {
   return apiUrl(
     `/api/stations/${encodeURIComponent(uuid)}/stream?ts=${Date.now()}`,
   );
+}
+
+function directStreamUrl(station: Station): string | null {
+  const url = (station.url_resolved || station.url || "").trim();
+  return url || null;
 }
 
 /**
@@ -49,6 +57,16 @@ function applyStreamCorsMode(audio: HTMLAudioElement, streamUrl: string): void {
   }
 }
 
+function createHiddenAudio(volume: number): HTMLAudioElement {
+  const audio = new Audio();
+  audio.preload = "none";
+  audio.volume = volume;
+  audio.setAttribute("playsinline", "true");
+  audio.style.display = "none";
+  document.body.appendChild(audio);
+  return audio;
+}
+
 async function persistLastPlayed(station: Station): Promise<void> {
   if (!loadToken()) return;
   try {
@@ -60,6 +78,7 @@ async function persistLastPlayed(station: Station): Promise<void> {
 
 export function useRadioPlayer() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const directAudioRef = useRef<HTMLAudioElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const sourceRef = useRef<MediaElementAudioSourceNode | null>(null);
   const analyserNodeRef = useRef<AnalyserNode | null>(null);
@@ -70,6 +89,8 @@ export function useRadioPlayer() {
   const usingDecodedRef = useRef(false);
   const stationRef = useRef<Station | null>(null);
   const wantPlayingRef = useRef(false);
+  const pathRef = useRef<PlaybackPath>("enhanced");
+  const switchingPathRef = useRef(false);
   const mediaReconnectTimerRef = useRef<number | null>(null);
   const mediaReconnectAttemptRef = useRef(0);
   const waitingWatchdogRef = useRef<number | null>(null);
@@ -98,13 +119,16 @@ export function useRadioPlayer() {
   const applyMasterVolume = useCallback((value: number) => {
     volumeRef.current = value;
     if (masterGainRef.current) {
-      masterGainRef.current.gain.value = value;
+      // Mute Web Audio output while on the direct background path.
+      masterGainRef.current.gain.value =
+        pathRef.current === "direct" ? 0 : value;
     }
-    // Media-element path still uses element volume when MES is inactive.
-    if (audioRef.current && !usingDecodedRef.current && !sourceRef.current) {
-      audioRef.current.volume = value;
-    } else if (audioRef.current && sourceRef.current) {
-      audioRef.current.volume = 1;
+    if (audioRef.current) {
+      audioRef.current.volume =
+        sourceRef.current || usingDecodedRef.current ? 1 : value;
+    }
+    if (directAudioRef.current) {
+      directAudioRef.current.volume = value;
     }
   }, []);
 
@@ -164,7 +188,6 @@ export function useRadioPlayer() {
       });
       filtersRef.current = filters;
 
-      // preamp → filters… → analyser → master → destination
       let node: AudioNode = preamp;
       for (const filter of filters) {
         node.connect(filter);
@@ -212,6 +235,28 @@ export function useRadioPlayer() {
     }
   }, []);
 
+  const stopProxyAudio = useCallback(async () => {
+    clearMediaReconnect();
+    await stopDecodedStream();
+    const audio = audioRef.current;
+    if (audio) {
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+    }
+    if (masterGainRef.current) {
+      masterGainRef.current.gain.value = 0;
+    }
+  }, [clearMediaReconnect, stopDecodedStream]);
+
+  const stopDirectAudio = useCallback(() => {
+    const direct = directAudioRef.current;
+    if (!direct) return;
+    direct.pause();
+    direct.removeAttribute("src");
+    direct.load();
+  }, []);
+
   const playViaMediaElement = useCallback(
     async (url: string) => {
       const audio = audioRef.current;
@@ -229,37 +274,6 @@ export function useRadioPlayer() {
     [connectMediaElementSource, stopDecodedStream],
   );
 
-  const scheduleMediaReconnect = useCallback(() => {
-    if (!wantPlayingRef.current || usingDecodedRef.current) return;
-    const current = stationRef.current;
-    if (!current) return;
-    if (mediaReconnectTimerRef.current != null) return;
-
-    const attempt = mediaReconnectAttemptRef.current;
-    mediaReconnectAttemptRef.current += 1;
-    const delay = Math.min(8_000, 500 * 2 ** Math.min(attempt, 4));
-
-    setStatus("loading");
-    mediaReconnectTimerRef.current = window.setTimeout(() => {
-      mediaReconnectTimerRef.current = null;
-      if (!wantPlayingRef.current || usingDecodedRef.current) return;
-      const station = stationRef.current;
-      if (!station) return;
-      void playViaMediaElement(streamProxyUrl(station.stationuuid))
-        .then(() => {
-          mediaReconnectAttemptRef.current = 0;
-          setStatus("playing");
-          setError(null);
-        })
-        .catch(() => {
-          scheduleMediaReconnectRef.current();
-        });
-    }, delay);
-  }, [playViaMediaElement]);
-
-  const scheduleMediaReconnectRef = useRef(scheduleMediaReconnect);
-  scheduleMediaReconnectRef.current = scheduleMediaReconnect;
-
   const playViaDecodedStream = useCallback(
     async (stationUuid: string) => {
       const audio = audioRef.current;
@@ -269,7 +283,6 @@ export function useRadioPlayer() {
         throw new Error("Audio graph not ready");
       }
 
-      // Stop element playback — decoded path owns audio output.
       audio.pause();
       audio.removeAttribute("src");
       audio.load();
@@ -293,6 +306,181 @@ export function useRadioPlayer() {
     },
     [],
   );
+
+  const playEnhanced = useCallback(
+    async (next: Station) => {
+      pathRef.current = "enhanced";
+      stopDirectAudio();
+      await setupAudioGraph();
+      await audioContextRef.current?.resume();
+      if (masterGainRef.current) {
+        masterGainRef.current.gain.value = volumeRef.current;
+      }
+
+      if (isWebKit()) {
+        try {
+          await playViaDecodedStream(next.stationuuid);
+          return;
+        } catch (decodedError) {
+          if (
+            decodedError instanceof DOMException &&
+            decodedError.name === "AbortError"
+          ) {
+            throw decodedError;
+          }
+          console.warn(
+            "WebKit decoded stream failed, falling back to media element",
+            decodedError,
+          );
+        }
+      }
+      await playViaMediaElement(streamProxyUrl(next.stationuuid));
+    },
+    [playViaDecodedStream, playViaMediaElement, setupAudioGraph, stopDirectAudio],
+  );
+
+  const playDirect = useCallback(
+    async (next: Station) => {
+      const direct = directAudioRef.current;
+      const url = directStreamUrl(next);
+      if (!direct || !url) {
+        // No direct URL — keep enhanced path.
+        await playEnhanced(next);
+        return;
+      }
+
+      pathRef.current = "direct";
+      await stopProxyAudio();
+      direct.removeAttribute("crossorigin");
+      direct.volume = volumeRef.current;
+      direct.src = url;
+      direct.load();
+      await direct.play();
+    },
+    [playEnhanced, stopProxyAudio],
+  );
+
+  const playForVisibility = useCallback(
+    async (next: Station) => {
+      if (document.hidden) {
+        await playDirect(next);
+      } else {
+        await playEnhanced(next);
+      }
+    },
+    [playDirect, playEnhanced],
+  );
+
+  const scheduleMediaReconnect = useCallback(() => {
+    if (!wantPlayingRef.current) return;
+    if (pathRef.current !== "enhanced") return;
+    if (usingDecodedRef.current) return;
+    if (document.hidden) return;
+    const current = stationRef.current;
+    if (!current) return;
+    if (mediaReconnectTimerRef.current != null) return;
+
+    const attempt = mediaReconnectAttemptRef.current;
+    mediaReconnectAttemptRef.current += 1;
+    const delay = Math.min(8_000, 500 * 2 ** Math.min(attempt, 4));
+
+    setStatus("loading");
+    mediaReconnectTimerRef.current = window.setTimeout(() => {
+      mediaReconnectTimerRef.current = null;
+      if (!wantPlayingRef.current || pathRef.current !== "enhanced") return;
+      if (document.hidden) return;
+      const station = stationRef.current;
+      if (!station) return;
+      void playViaMediaElement(streamProxyUrl(station.stationuuid))
+        .then(() => {
+          mediaReconnectAttemptRef.current = 0;
+          setStatus("playing");
+          setError(null);
+        })
+        .catch(() => {
+          scheduleMediaReconnectRef.current();
+        });
+    }, delay);
+  }, [playViaMediaElement]);
+
+  const scheduleMediaReconnectRef = useRef(scheduleMediaReconnect);
+  scheduleMediaReconnectRef.current = scheduleMediaReconnect;
+
+  const scheduleDirectReconnect = useCallback(() => {
+    if (!wantPlayingRef.current || pathRef.current !== "direct") return;
+    const current = stationRef.current;
+    if (!current) return;
+    if (mediaReconnectTimerRef.current != null) return;
+
+    const attempt = mediaReconnectAttemptRef.current;
+    mediaReconnectAttemptRef.current += 1;
+    const delay = Math.min(8_000, 500 * 2 ** Math.min(attempt, 4));
+
+    setStatus("loading");
+    mediaReconnectTimerRef.current = window.setTimeout(() => {
+      mediaReconnectTimerRef.current = null;
+      if (!wantPlayingRef.current || pathRef.current !== "direct") return;
+      const station = stationRef.current;
+      if (!station) return;
+      void playDirect(station)
+        .then(() => {
+          mediaReconnectAttemptRef.current = 0;
+          setStatus("playing");
+          setError(null);
+        })
+        .catch(() => {
+          scheduleDirectReconnectRef.current();
+        });
+    }, delay);
+  }, [playDirect]);
+
+  const scheduleDirectReconnectRef = useRef(scheduleDirectReconnect);
+  scheduleDirectReconnectRef.current = scheduleDirectReconnect;
+
+  const syncPathToVisibility = useCallback(async () => {
+    if (!wantPlayingRef.current || !stationRef.current) return;
+    if (switchingPathRef.current) return;
+
+    const wantDirect = document.hidden;
+    const nextPath: PlaybackPath = wantDirect ? "direct" : "enhanced";
+    if (pathRef.current === nextPath) return;
+
+    switchingPathRef.current = true;
+    clearMediaReconnect();
+    setStatus("loading");
+    try {
+      await playForVisibility(stationRef.current);
+      setStatus("playing");
+      setError(null);
+    } catch (err) {
+      if (isAutoplayBlocked(err)) {
+        // Background resume can be blocked; keep trying enhanced on focus.
+        if (!document.hidden) {
+          setStatus("paused");
+          wantPlayingRef.current = false;
+        }
+        return;
+      }
+      // If direct fails (bad station URL), fall back to enhanced even in background.
+      if (wantDirect) {
+        try {
+          await playEnhanced(stationRef.current);
+          setStatus("playing");
+          setError(null);
+          return;
+        } catch {
+          // fall through
+        }
+      }
+      setStatus("error");
+      setError(playbackErrorMessage(err));
+    } finally {
+      switchingPathRef.current = false;
+    }
+  }, [clearMediaReconnect, playEnhanced, playForVisibility]);
+
+  const syncPathToVisibilityRef = useRef(syncPathToVisibility);
+  syncPathToVisibilityRef.current = syncPathToVisibility;
 
   const setEqBand = useCallback(
     (index: number, value: number) => {
@@ -324,14 +512,10 @@ export function useRadioPlayer() {
   }, [applyEqToGraph]);
 
   useEffect(() => {
-    const audio = new Audio();
-    audio.preload = "none";
-    audio.volume = volumeRef.current;
-    // Safari: keep the element in the document for more reliable media behavior.
-    audio.setAttribute("playsinline", "true");
-    audio.style.display = "none";
-    document.body.appendChild(audio);
+    const audio = createHiddenAudio(volumeRef.current);
+    const direct = createHiddenAudio(volumeRef.current);
     audioRef.current = audio;
+    directAudioRef.current = direct;
 
     const clearWaitingWatchdog = () => {
       if (waitingWatchdogRef.current != null) {
@@ -340,51 +524,88 @@ export function useRadioPlayer() {
       }
     };
 
-    const onPlaying = () => {
-      if (usingDecodedRef.current) return;
+    const onProxyPlaying = () => {
+      if (pathRef.current !== "enhanced" || usingDecodedRef.current) return;
       clearWaitingWatchdog();
       mediaReconnectAttemptRef.current = 0;
       setStatus("playing");
       setError(null);
       void audioContextRef.current?.resume();
     };
-    const onPause = () => {
-      if (usingDecodedRef.current) return;
+    const onProxyPause = () => {
+      if (pathRef.current !== "enhanced" || usingDecodedRef.current) return;
       if (!audio.src) return;
-      if (!wantPlayingRef.current) {
-        setStatus("paused");
-      }
+      if (!wantPlayingRef.current) setStatus("paused");
     };
-    const onWaiting = () => {
-      if (usingDecodedRef.current || !wantPlayingRef.current) return;
+    const onProxyWaiting = () => {
+      if (pathRef.current !== "enhanced" || usingDecodedRef.current) return;
+      if (!wantPlayingRef.current) return;
       setStatus("loading");
       clearWaitingWatchdog();
-      // If we sit in "waiting" too long, force a fresh stream connection.
       waitingWatchdogRef.current = window.setTimeout(() => {
         waitingWatchdogRef.current = null;
-        if (!wantPlayingRef.current || usingDecodedRef.current) return;
+        if (!wantPlayingRef.current || pathRef.current !== "enhanced") return;
         scheduleMediaReconnectRef.current();
       }, 6_000);
     };
-    const onStalled = () => {
-      if (usingDecodedRef.current || !wantPlayingRef.current) return;
+    const onProxyStalled = () => {
+      if (pathRef.current !== "enhanced" || usingDecodedRef.current) return;
+      if (!wantPlayingRef.current) return;
       scheduleMediaReconnectRef.current();
     };
-    const onEnded = () => {
-      if (usingDecodedRef.current || !wantPlayingRef.current) return;
+    const onProxyEnded = () => {
+      if (pathRef.current !== "enhanced" || usingDecodedRef.current) return;
+      if (!wantPlayingRef.current) return;
       scheduleMediaReconnectRef.current();
     };
-    const onError = () => {
-      if (usingDecodedRef.current || !wantPlayingRef.current) return;
+    const onProxyError = () => {
+      if (pathRef.current !== "enhanced" || usingDecodedRef.current) return;
+      if (!wantPlayingRef.current) return;
       scheduleMediaReconnectRef.current();
     };
 
-    audio.addEventListener("playing", onPlaying);
-    audio.addEventListener("pause", onPause);
-    audio.addEventListener("waiting", onWaiting);
-    audio.addEventListener("stalled", onStalled);
-    audio.addEventListener("ended", onEnded);
-    audio.addEventListener("error", onError);
+    const onDirectPlaying = () => {
+      if (pathRef.current !== "direct") return;
+      mediaReconnectAttemptRef.current = 0;
+      setStatus("playing");
+      setError(null);
+    };
+    const onDirectPause = () => {
+      if (pathRef.current !== "direct") return;
+      if (!direct.src) return;
+      if (!wantPlayingRef.current) setStatus("paused");
+    };
+    const onDirectWaiting = () => {
+      if (pathRef.current !== "direct" || !wantPlayingRef.current) return;
+      setStatus("loading");
+    };
+    const onDirectError = () => {
+      if (pathRef.current !== "direct" || !wantPlayingRef.current) return;
+      scheduleDirectReconnectRef.current();
+    };
+    const onDirectEnded = () => {
+      if (pathRef.current !== "direct" || !wantPlayingRef.current) return;
+      scheduleDirectReconnectRef.current();
+    };
+
+    const onVisibility = () => {
+      void syncPathToVisibilityRef.current();
+    };
+
+    audio.addEventListener("playing", onProxyPlaying);
+    audio.addEventListener("pause", onProxyPause);
+    audio.addEventListener("waiting", onProxyWaiting);
+    audio.addEventListener("stalled", onProxyStalled);
+    audio.addEventListener("ended", onProxyEnded);
+    audio.addEventListener("error", onProxyError);
+
+    direct.addEventListener("playing", onDirectPlaying);
+    direct.addEventListener("pause", onDirectPause);
+    direct.addEventListener("waiting", onDirectWaiting);
+    direct.addEventListener("ended", onDirectEnded);
+    direct.addEventListener("error", onDirectError);
+
+    document.addEventListener("visibilitychange", onVisibility);
 
     return () => {
       wantPlayingRef.current = false;
@@ -393,15 +614,27 @@ export function useRadioPlayer() {
         window.clearTimeout(mediaReconnectTimerRef.current);
         mediaReconnectTimerRef.current = null;
       }
+      document.removeEventListener("visibilitychange", onVisibility);
+
       audio.pause();
       audio.removeAttribute("src");
-      audio.removeEventListener("playing", onPlaying);
-      audio.removeEventListener("pause", onPause);
-      audio.removeEventListener("waiting", onWaiting);
-      audio.removeEventListener("stalled", onStalled);
-      audio.removeEventListener("ended", onEnded);
-      audio.removeEventListener("error", onError);
+      audio.removeEventListener("playing", onProxyPlaying);
+      audio.removeEventListener("pause", onProxyPause);
+      audio.removeEventListener("waiting", onProxyWaiting);
+      audio.removeEventListener("stalled", onProxyStalled);
+      audio.removeEventListener("ended", onProxyEnded);
+      audio.removeEventListener("error", onProxyError);
       audio.remove();
+
+      direct.pause();
+      direct.removeAttribute("src");
+      direct.removeEventListener("playing", onDirectPlaying);
+      direct.removeEventListener("pause", onDirectPause);
+      direct.removeEventListener("waiting", onDirectWaiting);
+      direct.removeEventListener("ended", onDirectEnded);
+      direct.removeEventListener("error", onDirectError);
+      direct.remove();
+
       void decodedStreamRef.current?.stop();
       decodedStreamRef.current = null;
       void audioContextRef.current?.close();
@@ -420,8 +653,7 @@ export function useRadioPlayer() {
 
   const play = useCallback(
     async (next: Station) => {
-      const audio = audioRef.current;
-      if (!audio) return;
+      if (!audioRef.current || !directAudioRef.current) return;
 
       clearMediaReconnect();
       stationRef.current = next;
@@ -433,30 +665,7 @@ export function useRadioPlayer() {
       try {
         void playStation(next.stationuuid);
         void persistLastPlayed(next);
-
-        await setupAudioGraph();
-        await audioContextRef.current?.resume();
-
-        if (isWebKit()) {
-          try {
-            await playViaDecodedStream(next.stationuuid);
-          } catch (decodedError) {
-            if (
-              decodedError instanceof DOMException &&
-              decodedError.name === "AbortError"
-            ) {
-              return;
-            }
-            console.warn(
-              "WebKit decoded stream failed, falling back to media element",
-              decodedError,
-            );
-            await playViaMediaElement(streamProxyUrl(next.stationuuid));
-          }
-        } else {
-          await playViaMediaElement(streamProxyUrl(next.stationuuid));
-        }
-
+        await playForVisibility(next);
         setStatus("playing");
       } catch (playError) {
         if (isAutoplayBlocked(playError)) {
@@ -471,27 +680,24 @@ export function useRadioPlayer() {
         setError(playbackErrorMessage(playError));
       }
     },
-    [
-      clearMediaReconnect,
-      playViaDecodedStream,
-      playViaMediaElement,
-      setupAudioGraph,
-    ],
+    [clearMediaReconnect, playForVisibility],
   );
 
   const toggle = useCallback(async () => {
-    const audio = audioRef.current;
-    if (!audio || !station) return;
+    if (!audioRef.current || !directAudioRef.current || !station) return;
 
-    if (status === "playing" || (!audio.paused && !usingDecodedRef.current)) {
+    const isPlaying =
+      status === "playing" ||
+      (!audioRef.current.paused && pathRef.current === "enhanced") ||
+      (!directAudioRef.current.paused && pathRef.current === "direct") ||
+      (usingDecodedRef.current && pathRef.current === "enhanced");
+
+    if (isPlaying) {
       wantPlayingRef.current = false;
       clearMediaReconnect();
-      if (usingDecodedRef.current) {
-        await stopDecodedStream();
-        setStatus("paused");
-        return;
-      }
-      audio.pause();
+      await stopDecodedStream();
+      audioRef.current.pause();
+      directAudioRef.current.pause();
       setStatus("paused");
       return;
     }
@@ -503,24 +709,9 @@ export function useRadioPlayer() {
       setStatus("loading");
       setError(null);
 
-      await setupAudioGraph();
       void playStation(station.stationuuid);
       void persistLastPlayed(station);
-
-      if (isWebKit()) {
-        try {
-          await playViaDecodedStream(station.stationuuid);
-        } catch (decodedError) {
-          console.warn(
-            "WebKit decoded stream failed, falling back to media element",
-            decodedError,
-          );
-          await playViaMediaElement(streamProxyUrl(station.stationuuid));
-        }
-      } else {
-        await playViaMediaElement(streamProxyUrl(station.stationuuid));
-      }
-
+      await playForVisibility(station);
       setStatus("playing");
     } catch (playError) {
       wantPlayingRef.current = false;
@@ -529,29 +720,32 @@ export function useRadioPlayer() {
     }
   }, [
     clearMediaReconnect,
-    playViaDecodedStream,
-    playViaMediaElement,
-    setupAudioGraph,
+    playForVisibility,
     station,
     status,
     stopDecodedStream,
   ]);
 
   const stop = useCallback(async () => {
-    const audio = audioRef.current;
     wantPlayingRef.current = false;
     stationRef.current = null;
+    pathRef.current = "enhanced";
     clearMediaReconnect();
     await stopDecodedStream();
+    stopDirectAudio();
+    const audio = audioRef.current;
     if (audio) {
       audio.pause();
       audio.removeAttribute("src");
       audio.load();
     }
+    if (masterGainRef.current) {
+      masterGainRef.current.gain.value = volumeRef.current;
+    }
     setStation(null);
     setStatus("idle");
     setError(null);
-  }, [clearMediaReconnect, stopDecodedStream]);
+  }, [clearMediaReconnect, stopDecodedStream, stopDirectAudio]);
 
   const onVolumeInput = useCallback((event: SyntheticEvent<HTMLInputElement>) => {
     setVolume(Number(event.currentTarget.value));
