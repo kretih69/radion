@@ -35,9 +35,89 @@ function streamProxyUrl(uuid: string): string {
   );
 }
 
-function directStreamUrl(station: Station): string | null {
+function rawDirectStreamUrl(station: Station): string | null {
   const url = (station.url_resolved || station.url || "").trim();
   return url || null;
+}
+
+/**
+ * Shoutcast mounts often end with `/;` so browsers get audio instead of the
+ * HTML status page. HTMLMediaElement is flaky with a bare `/;` path (especially
+ * HE-AAC / audio/aacp) — try friendlier aliases first, then the original.
+ */
+function directStreamCandidates(url: string): string[] {
+  const candidates: string[] = [];
+  const push = (value: string) => {
+    if (value && !candidates.includes(value)) candidates.push(value);
+  };
+
+  try {
+    const parsed = new URL(url);
+    const path = parsed.pathname;
+
+    if (path === "/;" || path === ";") {
+      for (const nextPath of ["/;stream", "/;audio.mp3", "/stream", "/;"]) {
+        parsed.pathname = nextPath;
+        push(parsed.href);
+      }
+      return candidates;
+    }
+
+    if (path.endsWith("/;")) {
+      parsed.pathname = `${path}stream`;
+      push(parsed.href);
+      parsed.pathname = `${path}audio.mp3`;
+      push(parsed.href);
+      parsed.pathname = path;
+      push(parsed.href);
+      return candidates;
+    }
+  } catch {
+    // keep raw url below
+  }
+
+  push(url);
+  return candidates;
+}
+
+function playHtmlAudioElement(
+  audio: HTMLAudioElement,
+  url: string,
+  timeoutMs = 8_000,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+
+    const cleanup = () => {
+      audio.removeEventListener("playing", onPlaying);
+      audio.removeEventListener("error", onError);
+      window.clearTimeout(timer);
+    };
+
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      fn();
+    };
+
+    const onPlaying = () => finish(() => resolve());
+    const onError = () =>
+      finish(() => reject(new Error(`Direct stream failed: ${url}`)));
+
+    const timer = window.setTimeout(() => {
+      finish(() => reject(new Error(`Direct stream timed out: ${url}`)));
+    }, timeoutMs);
+
+    audio.removeAttribute("crossorigin");
+    audio.src = url;
+    audio.load();
+    audio.addEventListener("playing", onPlaying);
+    audio.addEventListener("error", onError);
+    void audio.play().catch((err) => {
+      finish(() => reject(err));
+    });
+  });
 }
 
 /**
@@ -342,20 +422,39 @@ export function useRadioPlayer() {
   const playDirect = useCallback(
     async (next: Station) => {
       const direct = directAudioRef.current;
-      const url = directStreamUrl(next);
+      const url = rawDirectStreamUrl(next);
       if (!direct || !url) {
-        // No direct URL — keep enhanced path.
         await playEnhanced(next);
         return;
       }
 
-      pathRef.current = "direct";
+      const candidates = directStreamCandidates(url);
       await stopProxyAudio();
-      direct.removeAttribute("crossorigin");
       direct.volume = volumeRef.current;
-      direct.src = url;
-      direct.load();
-      await direct.play();
+
+      let lastError: unknown;
+      for (const candidate of candidates) {
+        if (!wantPlayingRef.current) {
+          throw new DOMException("Aborted", "AbortError");
+        }
+        try {
+          pathRef.current = "direct";
+          await playHtmlAudioElement(direct, candidate);
+          return;
+        } catch (err) {
+          lastError = err;
+          direct.pause();
+          direct.removeAttribute("src");
+          direct.load();
+        }
+      }
+
+      console.warn(
+        "Direct play failed for station stream, falling back to proxy",
+        url,
+        lastError,
+      );
+      await playEnhanced(next);
     },
     [playEnhanced, stopProxyAudio],
   );
